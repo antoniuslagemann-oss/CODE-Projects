@@ -331,9 +331,12 @@ void main() {
 	// light scatters a little way into the agar in the shade
 	float spill = max(spread.b - env.b, 0.0) + 0.4 * max(spread.g - env.g, 0.0);
 	agar = mix(agar, u_outside, spill * mix(0.3, 0.55, u_dark));
-	float lamp = clamp(env.r, 0.0, 1.0);
-	agar = mix(agar, u_light, smoothstep(0.0, 1.0, lamp) * 0.92);
-	agar = screen(agar, u_light * spread.r * mix(0.06, 0.16, u_dark));
+	// light you shine: the agar under it lit like the agar outside the city,
+	// brightest in the middle, with a glow that spreads around it
+	float lamp = smoothstep(0.0, 0.9, textureLod(u_env, puv, 1.2).r);
+	float halo = 0.55 * textureLod(u_env, puv, 3.0).r + 0.45 * spread.r;
+	agar = mix(agar, u_outside, lamp * 0.85);
+	agar = screen(agar, u_light * (0.3 * lamp * lamp + mix(0.3, 0.42, u_dark) * halo));
 	float grain = texture(u_noise, p * 0.011).r - 0.5;
 	agar *= 1.0 + mix(0.05, 0.08, u_dark) * (env.a - 0.5) + mix(0.035, 0.05, u_dark) * grain;
 	// the agar climbs the glass a little at the edge
@@ -410,7 +413,7 @@ void main() {
 		col = screen(col, mix(vec3(1.0), u_light, 0.4) * spec * cover * mix(0.6, 0.38, u_dark));
 	}
 	// light you shine bleaches the slime a little too
-	col = mix(col, screen(col, u_light * 0.45), smoothstep(0.0, 0.8, lamp));
+	col = mix(col, screen(col, u_light * 0.4), lamp);
 
 	// --- glass and bench -----------------------------------------------------
 	float x = clamp((rr - inner) / wall, 0.0, 1.0); // across the glass wall, inside to out

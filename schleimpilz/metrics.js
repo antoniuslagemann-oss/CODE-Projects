@@ -920,9 +920,39 @@ const NetworkMetrics = (() => {
 		const x = new Float64Array(n), y = new Float64Array(n)
 		stations.forEach((s, i) => ((x[i] = s.x / pxPerKm), (y[i] = s.y / pxPerKm)))
 		const len = Float64Array.from(edges, ([p, q]) => dist(x[p], y[p], x[q], y[q]))
-		r = {stations, pxPerKm, x, y, edges, len, cache: new Map(), grid: null}
+		// which stations the track joins up, for counting what it links
+		const root = Int32Array.from({length: n}, (_, i) => i)
+		const find = (i) => {
+			while (root[i] !== i) i = root[i] = root[root[i]]
+			return i
+		}
+		for (const [p, q] of edges) root[find(p)] = find(q)
+		const comp = Int32Array.from({length: n}, (_, i) => find(i))
+		r = {stations, pxPerKm, x, y, edges, len, comp, cache: new Map(), grid: null}
 		railFor.set(edges, r)
 		return r
+	}
+
+	function nearestStation(base, x, y) {
+		let best = -1, bestD = Infinity
+		for (let i = 0; i < base.x.length; i++) {
+			const d = (base.x[i] - x) * (base.x[i] - x) + (base.y[i] - y) * (base.y[i] - y)
+			if (d < bestD) (bestD = d), (best = i)
+		}
+		return {station: best, km: Math.sqrt(bestD)}
+	}
+
+	// how many of the flakes the S+U links, each walking to its nearest station
+	function railLinks(base, px, py) {
+		const counts = new Map()
+		let most = 0
+		for (let f = 0; f < px.length; f++) {
+			const c = base.comp[nearestStation(base, px[f], py[f]).station]
+			const k = (counts.get(c) || 0) + 1
+			counts.set(c, k)
+			if (k > most) most = k
+		}
+		return most
 	}
 
 	// the S+U track plus a walk from each flake to its nearest station
@@ -936,12 +966,7 @@ const NetworkMetrics = (() => {
 		const termOf = new Int32Array(k)
 		let walkKm = 0, nodes = n
 		for (let f = 0; f < k; f++) {
-			let best = -1, bestD = Infinity
-			for (let i = 0; i < n; i++) {
-				const d = (base.x[i] - px[f]) * (base.x[i] - px[f]) + (base.y[i] - py[f]) * (base.y[i] - py[f])
-				if (d < bestD) (bestD = d), (best = i)
-			}
-			bestD = Math.sqrt(bestD)
+			const {station: best, km: bestD} = nearestStation(base, px[f], py[f])
 			if (bestD < 0.01) termOf[f] = best // on the station
 			else {
 				const node = nodes++
@@ -1139,14 +1164,14 @@ const NetworkMetrics = (() => {
 		// all the flakes the rail links, for the count
 		const all = []
 		flakes.forEach((f, i) => f.alive && all.push(i))
-		const railAll = measureRail(base, ...at(all), o.railMode)
+		const railConnected = railLinks(base, ...at(all))
 		let slime, rail, tree = null
 		if (s.flakes.length >= 2 && !s.forming) {
 			// the same flakes the slime links, for everything else
 			const [px, py] = at(s.flakes)
 			const t = mst(px, py)
 			slime = pick(evaluate(s.graph, s.termOf, px, py, t), s.flakes.length)
-			rail = pick(measureRail(base, px, py, o.railMode).result, railAll.connected)
+			rail = pick(measureRail(base, px, py, o.railMode).result, railConnected)
 			let line = 0, along = 0
 			const k = px.length
 			for (let i = 0; i < k; i++) {
@@ -1159,8 +1184,8 @@ const NetworkMetrics = (() => {
 		} else {
 			slime = pick(null, s.flakes.length)
 			if (s.forming) (slime.forming = true), (slime.lengthKm = s.lengthKm)
-			const r = railAll.result
-			rail = pick(r, railAll.connected)
+			// nothing to compare with yet: the rail over all the flakes
+			rail = pick(all.length >= 2 ? measureRail(base, ...at(all), o.railMode).result : null, railConnected)
 		}
 		const ov = s.forming ? null : overlap(net, base, s.meshEdges, pxPerKm, o)
 		return {

@@ -233,11 +233,17 @@ async function open({width, height, phone = false, scheme = 'light', dpr = 1}) {
 
 // Grow the slime, and do what a visitor would: put down a flake, shine a light.
 async function grow(page, steps) {
+	// the visit comes near the end, so its entries are at the top of the log
+	const at = Math.max(60, steps - 90)
+	let visited = false
 	for (let done = 0; done < steps; ) {
-		const n = Math.min(60, steps - done)
+		const n = Math.min(60, steps - done, visited ? Infinity : at - done)
 		await page.evaluate((k) => window.schleimpilz.step(k), n)
 		done += n
-		if (done === 120) await visit(page)
+		if (!visited && done >= at) {
+			await visit(page)
+			visited = true
+		}
 	}
 	await page.evaluate(() => window.schleimpilz.step(1))
 }
