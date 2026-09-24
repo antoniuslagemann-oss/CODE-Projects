@@ -144,11 +144,11 @@ function bundle(scripts, strict, lang) {
 	const width = Math.max(...scripts.map((s) => s.name.length))
 	const top = [
 		`// ${SCRIPT_NAME}: the scripts of index.html in one, made by tools/build-single.mjs.`,
-		`// Errors give a line of ${SCRIPT_NAME}, counted from the <script> tag:`,
+		`// Errors give a line of ${SCRIPT_NAME}, counted from the line this script starts on:`,
 		...scripts.map(() => ''), // one per file, filled in below
 	]
 	if (strict) top.push(`'use strict' // for all of it: the files' own 'use strict' only counts at the very top of a script`)
-	if (lang) top.push(`document.documentElement.lang ||= ${JSON.stringify(lang)} // <html lang> in index.html, which the host's skeleton replaces`)
+	if (lang) top.push(`document.documentElement.lang ||= ${JSON.stringify(lang)} // the lang of index.html, whose html element the host replaces`)
 
 	let line = 2 + top.length // line 1 is the rest of the <script> line, then the first banner
 	const parts = scripts.map((s) => {

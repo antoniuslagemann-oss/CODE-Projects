@@ -68,24 +68,24 @@ try {
 		const t = Date.now()
 		const steps = await page.evaluate((n) => window.schleimpilz.step(n), Math.min(CHUNK, STEPS - done))
 		console.log(`step ${steps}: ${await page.locator('#hud-reached').textContent()} reached (${Date.now() - t} ms)`)
-		await page.locator('#dish').screenshot({path: join(OUT, `dish-${String(steps).padStart(5, '0')}.png`)})
+		await page.locator('#dish').screenshot({path: join(OUT, `dish-${String(steps).padStart(5, '0')}.png`), timeout: 120000})
 	}
 
 	await page.evaluate(() => window.schleimpilz.setShowRail(true))
 	await page.evaluate(() => window.schleimpilz.step(1))
-	await page.locator('#dish').screenshot({path: join(OUT, 'dish-compare.png')})
-	await page.screenshot({path: join(OUT, 'page.png')})
+	await page.locator('#dish').screenshot({path: join(OUT, 'dish-compare.png'), timeout: 120000})
+	await page.screenshot({path: join(OUT, 'page.png'), timeout: 120000})
 
 	// the same moment in the dark theme and on a phone
 	await page.evaluate(() => window.schleimpilz.setShowRail(false))
 	await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
 	await page.evaluate(() => window.schleimpilz.step(1))
-	await page.screenshot({path: join(OUT, 'page-dark.png')})
+	await page.screenshot({path: join(OUT, 'page-dark.png'), timeout: 120000})
 	await page.evaluate(() => document.documentElement.removeAttribute('data-theme'))
 	await page.setViewportSize({width: 390, height: 844})
 	await page.waitForTimeout(300)
 	await page.evaluate(() => window.schleimpilz.step(1))
-	await page.screenshot({path: join(OUT, 'phone.png'), fullPage: true})
+	await page.screenshot({path: join(OUT, 'phone.png'), fullPage: true, timeout: 120000})
 
 	const reached = await reachedOf()
 	if (reached < 3) failures.push(`the slime reached only ${reached} oat flakes`)

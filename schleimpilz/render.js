@@ -28,6 +28,8 @@ const DishRenderer = (() => {
 		freshRadius: 0.6, // map px, the fine veins of a fresh sheet
 		witheredD: 3e-4, // conductivity below which a tube has withered away
 		veinFade: 2.2, // model time for a fresh vein to fade
+		matureFrom: 0.5, // model time from which a tube starts to thicken...
+		matureBy: 6, // ...and by which it has its full width
 		filmFade: 1.1, // model time for the fresh sheet to dry into track
 		filmRadius: 6.5, // map px
 		exploreRadius: 5.5, // map px
@@ -67,12 +69,15 @@ uniform float u_clock; // seconds
 uniform float u_motion; // 0 when still
 uniform vec4 u_tube; // thickest radius, reference rho, withered rho, fresh radius
 uniform vec4 u_life; // vein fade, breathing, pulse rate, pulse wavenumber
+uniform vec2 u_mature; // model time from which a tube starts to thicken, and by which it has
 
 const vec4 NOWHERE = vec4(-2.0, -2.0, 0.0, 1.0);
 
 // A tube's radius in map px, from its conductivity (D ~ r^4), its age and
-// whether it carries flow. Fresh veins are fine and fade; tubes that carry
-// flow take the radius their conductivity gives them.
+// whether it carries flow. The fresh sheet has fine veins, mostly along the
+// way it grows, that fade. A tube takes a while to build its walls, and only
+// one that carries flow gets the radius its conductivity gives it; by then
+// the ones nobody uses have withered.
 float radiusOf(out float youth) {
 	youth = 0.0;
 	float born = a_dyn.y;
@@ -84,8 +89,8 @@ float radiusOf(out float youth) {
 	float len = distance(a_seg.xy, a_seg.zw);
 	float along = clamp(abs(a_aux.y - a_aux.x) / max(len, 1e-3), 0.0, 1.0);
 	youth = exp(-age / u_life.x);
-	float vein = u_tube.w * (0.35 + 0.65 * along * along) * youth;
-	return mix(vein, max(net, vein), a_flow.x);
+	float vein = u_tube.w * (0.15 + 0.85 * smoothstep(0.3, 0.9, along)) * youth;
+	return max(vein, net * a_flow.x * smoothstep(u_mature.x, u_mature.y, age));
 }
 
 // The slow pulse that runs out from where the slime started.
@@ -118,6 +123,7 @@ uniform vec2 u_canvas;
 uniform float u_minPx;
 uniform float u_margin; // device px around each capsule, for smoothing
 out vec2 v_local;
+out vec2 v_world;
 flat out vec4 v_a; // length, drawn radius (map px), true radius (device px), streaming offset
 flat out vec4 v_b; // seed, kind
 void main() {
@@ -131,8 +137,11 @@ void main() {
 	float drawn = max(rpx, u_minPx) / u_scale;
 	vec2 local;
 	float len;
-	vec2 p = corner(drawn + u_margin / u_scale, local, len);
+	// room for tubes that bulge a little and puddles that spread
+	float room = a_aux.w > 0.5 ? 1.25 : 1.1;
+	vec2 p = corner(drawn * room + u_margin / u_scale, local, len);
 	v_local = local;
+	v_world = p;
 	v_a = vec4(len, drawn, rpx, a_dyn.z);
 	v_b = vec4(a_aux.z, a_aux.w, 0.0, 0.0);
 	vec2 s = (p - u_view.xy) * u_view.z + 0.5 * u_canvas;
@@ -142,6 +151,7 @@ void main() {
 	const FS_TUBE = `#version 300 es
 precision highp float;
 in vec2 v_local;
+in vec2 v_world;
 flat in vec4 v_a;
 flat in vec4 v_b;
 uniform float u_scale;
@@ -149,14 +159,18 @@ uniform float u_margin;
 uniform sampler2D u_noise;
 out vec4 o;
 void main() {
-	float len = v_a.x, r = v_a.y;
+	float len = v_a.x;
+	bool puddle = v_b.y > 0.5;
+	// tubes are a little uneven along their length, puddles ragged at the edge
+	float wobble = texture(u_noise, v_world * (puddle ? 0.035 : 0.012)).g - 0.5;
+	float r = v_a.y * (1.0 + (puddle ? 0.5 : 0.22) * wobble);
 	vec2 q = vec2(v_local.x - clamp(v_local.x, 0.0, len), v_local.y);
 	float sdf = (r - length(q)) * u_scale;
 	if (sdf < -u_margin) discard;
 	float rpx = r * u_scale;
 	float s = clamp(sdf, 0.0, rpx);
 	float h = sqrt(s * (2.0 * rpx - s)); // a round cross-section
-	if (v_b.y > 0.5) h *= 0.75; // puddles are flatter
+	if (puddle) h = min(h * 0.45, 2.2 * u_scale); // puddles are flat
 	// granules in the streaming protoplasm, carried along by the offset
 	vec2 cell = vec2((v_local.x - v_a.w) / ${GRANULE.toFixed(2)}, v_local.y / max(r, 0.4));
 	float grain = texture(u_noise, cell * (4.0 / 256.0) + v_b.x).b;
@@ -205,8 +219,7 @@ void main() {
 	float r = v_a.w;
 	float soft = 0.0;
 	if (r > 0.0) {
-		float k = 1.0 - smoothstep(r * 0.4, r + u_track.z, d);
-		soft = k * k * min(1.0, r / 1.4);
+		soft = (1.0 - smoothstep(r * 0.3, r + u_track.z, d)) * min(1.0, r / 1.4);
 	}
 	o = vec4(film, ghost, soft, 0.0);
 }`
@@ -319,8 +332,8 @@ void main() {
 	vec2 sp = p + LAMP * 2.4;
 	float shade = texture(u_track, vec2(sp.x / u_sim.x, 1.0 - sp.y / u_sim.y)).b;
 	vec3 tint = mix(vec3(1.0), u_slime, 0.45) * 0.8;
-	agar *= mix(vec3(1.0), tint, shade * 0.55 * (1.0 - u_dark));
-	agar += u_dark * mix(u_slime, u_core, 0.4) * tr.b * 0.16;
+	agar *= mix(vec3(1.0), tint, shade * shade * 0.6 * (1.0 - u_dark));
+	agar += u_dark * mix(u_slime, u_core, 0.3) * tr.b * tr.b * 0.42;
 
 	// --- the tubes -----------------------------------------------------------
 	vec3 col = agar;
@@ -343,8 +356,9 @@ void main() {
 		float q = clamp(1.0 - T.r / max(rpx, 0.8), 0.0, 1.0); // 0 on the ridge, 1 at the wall
 		float thick = smoothstep(0.45, u_rMax * 0.95, rs);
 
-		vec3 body = mix(u_slime, u_core, thick * 0.85);
-		vec3 lumen = screen(body, mix(u_slime, vec3(1.0), 0.55) * mix(0.42, 0.3, u_dark));
+		vec3 deep = mix(u_core, u_slime * vec3(1.06, 0.8, 0.3), u_dark);
+		vec3 body = mix(u_slime, deep, thick * 0.85);
+		vec3 lumen = mix(screen(body, mix(u_slime, vec3(1.0), 0.55) * 0.42), mix(body, u_core, 0.25 + 0.6 * thick), u_dark);
 		vec3 wallCol = mix(body, body * body, 0.55) * 0.9;
 		vec3 tube = mix(lumen, body, smoothstep(0.05, 0.65, q));
 		tube = mix(tube, wallCol, smoothstep(0.5, 1.0, q) * (0.3 + 0.55 * thick));
@@ -460,14 +474,15 @@ void main() {
 			this.envTex = this.texture(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, width, height, {mipmaps: true})
 			this.envDirty = [0, 0, width, height]
 
-			// r fine grain, b granules, a dither
+			// r fine grain, g smooth wobble, b granules, a dither
 			const S = 256
 			const fine = valueNoise(S, 2, 4), fine2 = valueNoise(S, 4, 5), gran = valueNoise(S, 4, 6), gran2 = valueNoise(S, 2, 7)
+			const soft = valueNoise(S, 16, 8), soft2 = valueNoise(S, 8, 9)
 			const noise = new Uint8Array(S * S * 4)
 			for (let i = 0; i < S * S; i++) {
 				const g = smoothstep(0.3, 0.8, 0.7 * gran[i] + 0.3 * gran2[i])
 				noise[i * 4] = Math.round(255 * (0.6 * fine[i] + 0.4 * fine2[i]))
-				noise[i * 4 + 1] = 128
+				noise[i * 4 + 1] = Math.round(255 * Math.min(1, Math.max(0, (0.65 * soft[i] + 0.35 * soft2[i] - 0.5) * 1.7 + 0.5)))
 				noise[i * 4 + 2] = Math.round(255 * g)
 				noise[i * 4 + 3] = hash(i + 99991) >>> 24
 			}
@@ -827,7 +842,8 @@ void main() {
 				const mag = (qAbs[e] += (Math.abs(Q) - qAbs[e]) * k)
 				const carries = smoothstep(P.flowLow, P.flowHigh, mag)
 				const rho = Math.sqrt(Math.sqrt(Math.max(d, 0) / Dref))
-				const size = carries * rho * smoothstep(rhoCut, rhoCut * 1.9, rho)
+				const mature = smoothstep(P.matureFrom, P.matureBy, net.time - born[e])
+				const size = carries * mature * rho * smoothstep(rhoCut, rhoCut * 1.9, rho)
 				const g = Math.max(ghost[e] * keep, Math.min(1, size))
 				ghost[e] = g
 				if (move > 0 && carries > 0.01 && mag > 0) {
@@ -903,10 +919,13 @@ void main() {
 			const rhoRef = Math.sqrt(Math.sqrt(this.Dref))
 			gl.uniform4f(u.u_tube, P.tubeRadius, rhoRef, Math.sqrt(Math.sqrt(P.witheredD / this.Dref)), P.freshRadius)
 			gl.uniform4f(u.u_life, P.veinFade, P.breathe, (2 * Math.PI) / P.pulse, (2 * Math.PI) / P.wave)
+			gl.uniform2f(u.u_mature, P.matureFrom, P.matureBy)
 		}
 
 		// seconds: a clock for the slow life in the tubes. {still: true} holds
-		// everything that moves on its own (prefers-reduced-motion).
+		// everything that moves on its own (prefers-reduced-motion). view:
+		// {x, y, zoom}, the map point shown at the centre of the canvas and how
+		// far to zoom in (1: the whole map fits). See DishRenderer.viewMatrix.
 		render(seconds = 0, opts = {}) {
 			const gl = this.gl
 			const P = this.params
@@ -922,8 +941,10 @@ void main() {
 			this.cpuMs = performance.now() - t0
 
 			const [w, h] = this.tubeSize
-			const scale = Math.min(w / this.width, h / this.height)
-			const tap = Math.min(2, Math.max(1, 0.8 * scale))
+			const m = DishRenderer.viewMatrix(opts && opts.view, w, h, this.width, this.height)
+			const scale = m[0]
+			const cx = (w / 2 - m[4]) / scale, cy = (h / 2 - m[5]) / scale
+			const tap = Math.min(3.5, Math.max(1, 0.8 * scale))
 			const margin = tap + 2
 			gl.disable(gl.DEPTH_TEST)
 			gl.disable(gl.CULL_FACE)
@@ -963,7 +984,7 @@ void main() {
 				gl.bindFramebuffer(gl.FRAMEBUFFER, this.trackFbo)
 				gl.useProgram(tr.p)
 				this.setInstanceUniforms(tr, 1, 0)
-				gl.uniform4f(tr.u.u_track, P.filmRadius, P.filmFade, 2.6, 0)
+				gl.uniform4f(tr.u.u_track, P.filmRadius, P.filmFade, 4, 0)
 				gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.instances)
 			}
 
@@ -975,6 +996,8 @@ void main() {
 				const tu = this.programs.tube
 				gl.useProgram(tu.p)
 				this.setInstanceUniforms(tu, scale, still ? 0 : 1)
+				gl.uniform4f(tu.u.u_view, cx, cy, scale, 0)
+				gl.uniform2f(tu.u.u_canvas, w, h)
 				gl.uniform1f(tu.u.u_minPx, P.minPx)
 				gl.uniform1f(tu.u.u_margin, margin)
 				gl.activeTexture(gl.TEXTURE0)
@@ -1000,7 +1023,7 @@ void main() {
 			}
 			gl.uniform2f(d.u.u_canvas, w, h)
 			gl.uniform2f(d.u.u_sim, this.width, this.height)
-			gl.uniform1f(d.u.u_scale, scale)
+			gl.uniform4f(d.u.u_view, cx, cy, scale, 0)
 			gl.uniform1f(d.u.u_dark, pal.dark ? 1 : 0)
 			gl.uniform1f(d.u.u_tap, tap)
 			gl.uniform1f(d.u.u_margin, margin)
@@ -1035,10 +1058,10 @@ void main() {
 				const rNet = P.tubeRadius * rho * smoothstep(rhoCut, rhoCut * 1.9, rho)
 				const len = Math.hypot(this.geo[o + 2] - this.geo[o], this.geo[o + 3] - this.geo[o + 1])
 				const along = Math.min(1, Math.abs(this.aux[o + 1] - this.aux[o]) / Math.max(len, 1e-3))
-				const vein = P.freshRadius * (0.35 + 0.65 * along * along) * Math.exp(-age / P.veinFade)
-				const r = vein + (Math.max(rNet, vein) - vein) * carries
+				const vein = P.freshRadius * (0.15 + 0.85 * smoothstep(0.3, 0.9, along)) * Math.exp(-age / P.veinFade)
+				const r = Math.max(vein, rNet * carries * smoothstep(P.matureFrom, P.matureBy, age))
 				if (r * scale < 0.04) continue
-				if (carries > 0.5 && rNet > vein) tubes++
+				if (r > vein) tubes++
 				else veins++
 				const ext = Math.max(r * scale, P.minPx) + Math.min(2, Math.max(1, 0.8 * scale)) + 2
 				fragments += (len * scale + 2 * ext) * 2 * ext
@@ -1048,5 +1071,20 @@ void main() {
 	}
 
 	DishRenderer.DEFAULTS = DEFAULTS
+
+	// The view as a Canvas2D transform from map px to device px:
+	//   ctx.setTransform(...DishRenderer.viewMatrix(view, canvas.width, canvas.height))
+	// then draw in map px. A point on the canvas (device px) back on the map:
+	//   x = (cx - m[4]) / m[0], y = (cy - m[5]) / m[3]
+	// view: {x, y, zoom}, the map point at the centre of the canvas and the
+	// zoom (1: the whole map fits, as without a view).
+	DishRenderer.viewMatrix = (view, canvasWidth, canvasHeight, width = 1024, height = width) => {
+		const zoom = view && view.zoom > 0 ? view.zoom : 1
+		const x = view && Number.isFinite(view.x) ? view.x : width / 2
+		const y = view && Number.isFinite(view.y) ? view.y : height / 2
+		const s = Math.min(canvasWidth / width, canvasHeight / height) * zoom
+		return [s, 0, 0, s, canvasWidth / 2 - x * s, canvasHeight / 2 - y * s]
+	}
+
 	return DishRenderer
 })()

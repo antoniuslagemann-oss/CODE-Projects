@@ -201,6 +201,7 @@
 
 	function syncFlakes() {
 		net.setFlakes(state.flakes)
+		renderer.setFlakes?.(state.flakes)
 		state.overlayDirty = true
 	}
 
@@ -940,8 +941,11 @@
 			advance(state.speed)
 			state.clock += dt
 		}
-		renderer.update(net)
-		renderer.render(now / 1000, {still: reducedMotion, view})
+		// in tests the steps come from window.schleimpilz.step(), which draws too
+		if (!MANUAL) {
+			renderer.update(net)
+			renderer.render(now / 1000, {still: reducedMotion, view})
+		}
 		state.frame++
 		if (state.frame % 12 === 0) {
 			checkReached()

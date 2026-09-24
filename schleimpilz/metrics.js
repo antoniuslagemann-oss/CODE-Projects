@@ -49,8 +49,8 @@ const NetworkMetrics = (() => {
 	const DEFAULTS = {
 		relThreshold: 1e-3, // a tube counts from this fraction of the strongest one...
 		floorFactor: 4, // ...and from this many times the model's floor (minD)
-		loopSpacings: 6, // loops shorter than this many mesh spacings are one braided tube
-		smoothSpacings: 0.5, // mesh zig-zag smaller than this many spacings is smoothed away
+		braidSpacings: 1.5, // loops narrower than this many mesh spacings are one braided tube
+		smoothSpacings: 0.75, // mesh zig-zag smaller than this many spacings is smoothed away
 		nearKm: 0.4, // a tube within this of a track runs along it
 		sampleKm: 0.1, // step when walking along track to check that
 		dish: null, // {x, y, r} in sim px; defaults to the circle inside the mesh's square
@@ -138,7 +138,10 @@ const NetworkMetrics = (() => {
 	function index(g) {
 		const n = g.n, m = g.u.length
 		const start = new Int32Array(n + 1)
-		for (let e = 0; e < m; e++) start[g.u[e] + 1]++, start[g.v[e] + 1]++
+		for (let e = 0; e < m; e++) {
+			start[g.u[e] + 1]++
+			if (g.v[e] !== g.u[e]) start[g.v[e] + 1]++ // a loop on one node is listed once
+		}
 		for (let i = 0; i < n; i++) start[i + 1] += start[i]
 		const fill = start.slice(0, n)
 		const adj = new Int32Array(2 * m)
@@ -682,6 +685,12 @@ const NetworkMetrics = (() => {
 					e = next
 				}
 				chainStart.push(chainNodes.length)
+				if (keep[i] < 0) {
+					// cannot happen after pruning, but never link to nowhere
+					chainNodes.length = c0
+					chainStart.pop()
+					continue
+				}
 				const smooth = smoothLength(net, chainNodes, c0, chainNodes.length, eps) / pxPerKm
 				// a tube's strength: its mean conductivity along its length
 				link(g, keep[s0], keep[i], smooth, smooth, sumD / raw, [chainStart.length - 2])
@@ -698,29 +707,89 @@ const NetworkMetrics = (() => {
 		return {threshold, maxD, graph: g, termOf, chains: {nodes: Int32Array.from(chainNodes), start: Int32Array.from(chainStart)}}
 	}
 
-	// Loops shorter than loopKm are one tube braided on the mesh: drop the
-	// weaker side until there are none.
-	function unbraid(g, on, loopKm) {
+	// Two strands that run side by side are one tube braided on the mesh, not
+	// two routes. For every link on a loop, take the smallest loop through it
+	// and its mean width, twice its area over its length. Where that is below
+	// braidKm, the weakest link of the loop goes. Each round removes the
+	// weakest link of every such loop at once, which can never cut the network
+	// apart: a link that is the weakest of a loop through it is never needed to
+	// hold two pieces together that only it and stronger links join.
+	function unbraid(g, on, chains, net, braidKm, pxPerKm, rounds = 8) {
 		const m = g.u.length
-		const dist = new Float64Array(g.n)
+		const dist = new Float64Array(g.n), via = new Int32Array(g.n)
+		const cut = new Uint8Array(m)
+		const X = net.x, Y = net.y
+		const weaker = (f, w) => w < 0 || g.weak[f] < g.weak[w] || (g.weak[f] === g.weak[w] && f < w)
 		let removed = 0
-		for (;;) {
-			let worst = -1
+		for (let round = 0; round < rounds; round++) {
+			const {bridge} = tarjan(g, on, false)
+			cut.fill(0)
+			let any = false
 			for (let e = 0; e < m; e++) {
-				if (!on[e]) continue
-				if (g.len[e] >= loopKm) continue
-				let small
-				if (g.u[e] === g.v[e]) small = true
-				else {
-					dijkstra(g, on, g.u[e], dist, loopKm - g.len[e], e)
-					small = g.len[e] + dist[g.v[e]] < loopKm
+				if (!on[e] || bridge[e] || g.u[e] === g.v[e]) continue
+				const loop = [e]
+				if (!shortestPath(g, on, g.v[e], g.u[e], e, dist, via, loop, 40)) continue
+				// the loop as a polygon of mesh nodes: e from u to v, then back to u
+				let area = 0, len = 0, weakest = -1, at = g.u[e]
+				const n0 = chains.nodes[chains.start[g.parts[e][0]]]
+				let px = X[n0], py = Y[n0]
+				for (const f of loop) {
+					const c = g.parts[f][0]
+					const c0 = chains.start[c], c1 = chains.start[c + 1]
+					const forward = g.u[f] === at
+					for (let q = 1; q < c1 - c0; q++) {
+						const node = chains.nodes[forward ? c0 + q : c1 - 1 - q]
+						const x = X[node], y = Y[node]
+						area += px * y - x * py
+						len += Math.hypot(x - px, y - py)
+						px = x
+						py = y
+					}
+					at = forward ? g.v[f] : g.u[f]
+					if (weaker(f, weakest)) weakest = f
 				}
-				if (small && (worst < 0 || g.weak[e] < g.weak[worst])) worst = e
+				const width = len > 0 ? Math.abs(area) / len / pxPerKm : 0
+				if (width < braidKm) {
+					cut[weakest] = 1
+					any = true
+				}
 			}
-			if (worst < 0) return removed
-			on[worst] = 0
-			removed++
+			if (!any) break
+			for (let e = 0; e < m; e++) if (cut[e]) (on[e] = 0), removed++
 		}
+		return removed
+	}
+
+	// The shortest path between two nodes that avoids one link, as a list of
+	// links from `from` to `to`, appended to out. False if there is none.
+	function shortestPath(g, on, from, to, skip, dist, via, out, limit = Infinity) {
+		dist.fill(Infinity)
+		via.fill(-1)
+		dist[from] = 0
+		heap.size = 0
+		heap.push(0, from)
+		while (heap.size) {
+			const i = heap.pop()
+			const d = heap.topKey
+			if (d > dist[i]) continue
+			if (i === to || d > limit) break
+			for (let k = g.adjStart[i]; k < g.adjStart[i + 1]; k++) {
+				const e = g.adjEdge[k]
+				if (!on[e] || e === skip) continue
+				const j = other(g, e, i)
+				const nd = d + g.len[e]
+				if (nd < dist[j]) {
+					dist[j] = nd
+					via[j] = e
+					heap.push(nd, j)
+				}
+			}
+		}
+		if (!(dist[to] <= limit)) return false
+		const path = []
+		for (let i = to; i !== from; i = other(g, via[i], i)) path.push(via[i])
+		for (let q = path.length - 1; q >= 0; q--) out.push(path[q])
+		return true
 	}
 
 	// --- The real network ----------------------------------------------------------
@@ -874,7 +943,7 @@ const NetworkMetrics = (() => {
 		const on = new Uint8Array(g.u.length).fill(1)
 		const term = new Uint8Array(g.n)
 		for (const t of sg.termOf) if (t >= 0) term[t] = 1
-		out.braids = unbraid(g, on, o.loopSpacings * net.spacing / pxPerKm)
+		out.braids = unbraid(g, on, sg.chains, net, (o.braidSpacings * net.spacing) / pxPerKm, pxPerKm)
 		// what is left of the piece after unbraiding, and what serves the flakes
 		const {flakes: linked} = mainPart(g, on, sg.termOf)
 		const t2 = new Uint8Array(g.n)
