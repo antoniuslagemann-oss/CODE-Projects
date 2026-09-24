@@ -6,15 +6,17 @@
 // A frame is four draws:
 //  1. explored, at map size and kept from frame to frame: everywhere the
 //     slime has been. Only tubes grown since the last frame are added.
-//  2. track, at map size: the fresh sheet at the growing edge, faint marks
-//     where tubes have withered, and a soft copy of the living tubes for
-//     their shadow and glow.
+//  2. track, at half map size: the sheet of protoplasm the tubes grow out
+//     of, the growing margin, faint marks where tubes have withered, and a
+//     soft copy of the living tubes that their glow is made from.
 //  3. tubes, at screen size: every living tube as a capsule. Blending keeps
 //     the largest value of each channel, so tubes that meet become one smooth
 //     surface, like one organism. Channels: signed distance to the nearest
 //     tube wall, height of the round cross-section, the tube's radius, and
 //     the granules streaming inside it.
-//  4. the dish itself: bench, glass, agar, and the tubes lit and shaded.
+//  4. the dish itself: agar lit through the mask, the slime glowing on it,
+//     and the glass. Outside the glass the canvas stays transparent, with
+//     only a faint contact shadow, so the page shows through.
 //
 // Everything is plain WebGL2 and needs EXT_color_buffer_float.
 
@@ -33,30 +35,33 @@ const DishRenderer = (() => {
 	const WRAP = GRANULE * 64 // the granule pattern repeats after this many map px
 
 	const DEFAULTS = {
-		tubeRadius: 3.2, // map px, radius of the thickest trunk
-		contrast: 1.3, // radius goes as (D^1/4)^contrast: 1 is Poiseuille, more sets trunks apart
-		freshRadius: 0.6, // map px, the fine veins of a fresh sheet
-		witheredD: 3e-4, // conductivity below which a tube has withered away
-		veinFade: 2.2, // model time for a fresh vein to fade
-		matureFrom: 0.5, // model time from which a tube starts to thicken...
-		matureBy: 6, // ...and by which it has its full width
-		filmFade: 1.6, // model time for the fresh sheet to dry into track
-		filmRadius: 6.5, // map px
+		tubeRadius: 3.6, // map px, radius of a tube with conductivity refD
+		refD: 2, // conductivity of the thickest trunks
+		contrast: 0.5, // radius goes as (D / refD)^contrast; 0.25 would be Poiseuille, 0.5 sets trunks apart
+		veinD: 0.15, // conductivity from which a tube shows as a vein, fully from 2.8 times that
+		matureFrom: 1, // model time from which a tube starts to show, which is when the tubes nobody uses have thinned...
+		matureBy: 2.5, // ...and by which it has its full width
+		sheetFloor: 0.003, // conductivity from which the mesh carries a sheet of protoplasm...
+		sheetD: 0.06, // ...and at which the sheet is whole; above that it gathers into brighter channels
+		sheetRadius: 6.5, // map px
+		youthFade: 0.3, // model time over which the growing margin glows
 		exploreRadius: 5.5, // map px
-		flowLow: 0.004, // smoothed |Q| from which a tube counts as carrying flow...
-		flowHigh: 0.03, // ...and from which it fully does
-		puddle: 9, // map px, radius of the slime on an oat flake
-		ghostFade: 80, // model time for the mark of a withered tube to fade
-		wetFade: 14, // model time for the track the slime leaves to dry
+		flowLow: 0.002, // smoothed |Q| from which a tube counts as carrying flow...
+		flowHigh: 0.02, // ...and from which it fully does
+		puddle: 8.5, // map px, radius of the slime on an oat flake
+		ghostFade: 12, // model time for the mark of a withered tube to fade
+		wetFade: 2.5, // model time for the track the slime leaves to dry
 		smoothPaths: 4, // rounds of smoothing that turn the mesh's zigzags into curves
-		breathe: 0.045, // how much tubes widen and narrow with each pulse
+		breathe: 0.04, // how much tubes widen and narrow with each pulse
 		pulse: 5.5, // seconds per pulse
 		wave: 240, // crawl distance per wavelength of the pulse
 		stream: 5, // map px per second, the fastest streaming
-		streamRef: 0.6, // flow per sqrt(conductivity) at which streaming gets fast
+		streamRef: 1.5, // flow per sqrt(conductivity) at which streaming gets fast
 		smoothing: 1.2, // seconds over which the flow is averaged
-		smoothingModel: 0.4, // same, in model time
+		smoothingModel: 0.3, // same, in model time
 		minPx: 0.7, // device px, radius of the thinnest drawn line
+		rimInset: 5, // map px between the edge of the map and the glass
+		wall: 7, // map px, the glass wall seen from above
 	}
 
 	// --- Shaders ---------------------------------------------------------------
@@ -79,34 +84,27 @@ uniform float u_scale; // device px per map px in the target
 uniform float u_time; // model time
 uniform float u_clock; // seconds
 uniform float u_motion; // 0 when still
-uniform vec4 u_tube; // thickest radius, reference rho, withered rho, fresh radius
-uniform float u_contrast;
-uniform vec4 u_life; // vein fade, breathing, pulse rate, pulse wavenumber
-uniform vec2 u_mature; // model time from which a tube starts to thicken, and by which it has
+uniform vec4 u_tube; // radius at refD, refD, vein threshold, contrast
+uniform vec4 u_life; // margin fade, breathing, pulse rate, pulse wavenumber
+uniform vec2 u_mature; // model time from which a tube starts to show, and by which it has
 
 const vec4 NOWHERE = vec4(-2.0, -2.0, 0.0, 1.0);
 
-// A tube's radius in map px, from its conductivity (D ~ r^4), its age and
-// whether it carries flow. The fresh sheet has fine veins, mostly along the
-// way it grows, that fade. A tube takes a while to build its walls, and only
-// one that carries flow gets the radius its conductivity gives it; by then
-// the ones nobody uses have withered.
+// A tube's radius in map px. Conductivity goes with the fourth power of the
+// radius; drawn with its square root the trunks stand out from the branches.
+// A tube shows once it is strong enough to be a vein, carries flow and has
+// had a little while to build its walls; until then its protoplasm is part
+// of the sheet (see the track pass).
 float radiusOf(out float youth) {
 	youth = 0.0;
 	float born = a_dyn.y;
 	if (born <= 0.0 || a_dyn.x < 0.0) return 0.0;
 	float age = max(u_time - born, 0.0);
-	if (a_aux.w > 0.5) return a_dyn.x * smoothstep(0.0, 1.2, age);
-	float rho = pow(a_dyn.x, 0.25) / u_tube.y;
-	float net = u_tube.x * pow(rho, u_contrast) * smoothstep(u_tube.z, u_tube.z * 1.9, rho);
-	float len = distance(a_seg.xy, a_seg.zw);
-	float along = clamp(abs(a_aux.y - a_aux.x) / max(len, 1e-3), 0.0, 1.0);
 	youth = exp(-age / u_life.x);
-	// a random few of the fresh edges, mostly those along the way it grows
-	float keep = step(fract(a_aux.z * 7.31), 0.06 + 0.55 * smoothstep(0.72, 0.97, along));
-	// veins form a little behind the front, which is one film
-	float vein = u_tube.w * keep * (0.6 + 0.5 * fract(a_aux.z * 3.7)) * youth * smoothstep(0.25, 0.9, age);
-	return max(vein, net * a_flow.x * smoothstep(u_mature.x, u_mature.y, age));
+	if (a_aux.w > 0.5) return a_dyn.x * smoothstep(0.0, 0.4, age);
+	float D = a_dyn.x;
+	float vein = smoothstep(u_tube.z, u_tube.z * 2.8, D);
+	return u_tube.x * pow(D / u_tube.y, u_tube.w) * vein * a_flow.x * smoothstep(u_mature.x, u_mature.y, age);
 }
 
 // The slow pulse that runs out from where the slime started.
@@ -188,8 +186,8 @@ void main() {
 	float h = sqrt(s * (2.0 * rpx - s)); // a round cross-section
 	if (puddle) h = min(h * 0.45, 2.2 * u_scale); // puddles are flat
 	// granules in the streaming protoplasm, carried along by the offset
-	vec2 cell = vec2((v_local.x - v_a.w) / ${GRANULE.toFixed(2)}, v_local.y / max(0.45 * r, 0.4));
-	float grain = texture(u_noise, cell * (4.0 / 256.0) + v_b.x).b;
+	vec2 cell = vec2((v_local.x - v_a.w) / ${GRANULE.toFixed(2)}, v_local.y / max(0.8 * r, 0.4));
+	float grain = texture(u_noise, cell * (4.0 / 256.0) + v_b.x).g;
 	// a puddle reads as a thick tube, not as the thickest there is
 	float shown = puddle ? min(v_a.z, 1.7 * u_scale) : v_a.z;
 	o = vec4(sdf, h, sdf > 0.0 ? shown : 0.0, grain * h);
@@ -198,19 +196,26 @@ void main() {
 	const VS_TRACK = `#version 300 es
 precision highp float;
 ${INSTANCE}
-uniform vec4 u_track; // film radius, film fade, softness of shadow and glow, 0
+uniform vec4 u_track; // sheet radius, conductivity of a whole sheet, softness of the glow, sheet floor
 out vec2 v_local;
-flat out vec4 v_a; // length, film, mark of a withered tube, radius
+flat out vec4 v_a; // length, sheet, mark of a withered tube, radius
+flat out float v_young;
 void main() {
 	float youth;
 	float r = radiusOf(youth);
 	float grown = a_dyn.y > 0.0 && a_dyn.x >= 0.0 ? 1.0 : 0.0;
-	float film = grown * (1.0 - a_aux.w) * exp(-max(u_time - a_dyn.y, 0.0) / u_track.y);
+	float tube = grown * (1.0 - a_aux.w);
+	// protoplasm spread over the mesh, as much as the conductivity says;
+	// where it has gathered into a vein, less of it is left around
+	// a thin film over most of it, and bright channels where more flows
+	float D = a_dyn.x;
+	float sheet = tube * (0.5 * smoothstep(u_track.w, u_track.y, D) + 0.5 * smoothstep(u_track.y, 0.3, D)) * (1.0 - smoothstep(0.15, 0.7, r));
 	float ghost = grown * a_flow.y;
+	float young = tube * youth;
 	float ext = 0.0;
-	if (film > 0.01) ext = u_track.x;
+	if (sheet > 0.01 || young > 0.01) ext = u_track.x;
 	if (ghost > 0.02) ext = max(ext, 3.0);
-	if (r > 0.15) ext = max(ext, r + u_track.z);
+	if (r > 0.15) ext = max(ext, 1.6 * r + u_track.z);
 	if (ext <= 0.0) {
 		gl_Position = NOWHERE;
 		return;
@@ -219,7 +224,8 @@ void main() {
 	float len;
 	vec2 p = corner(ext, local, len);
 	v_local = local;
-	v_a = vec4(len, film, ghost, r);
+	v_a = vec4(len, sheet, ghost, r);
+	v_young = young;
 	gl_Position = clipOf(p);
 }`
 
@@ -227,19 +233,18 @@ void main() {
 precision highp float;
 in vec2 v_local;
 flat in vec4 v_a;
+flat in float v_young;
 uniform vec4 u_track;
 out vec4 o;
 void main() {
 	float d = length(vec2(v_local.x - clamp(v_local.x, 0.0, v_a.x), v_local.y));
-	float film = v_a.y * (1.0 - smoothstep(u_track.x * 0.3, u_track.x, d));
+	float k = 1.0 - smoothstep(u_track.x * 0.3, u_track.x, d);
 	float gw = 0.7 + 1.1 * v_a.z;
 	float ghost = v_a.z * (1.0 - smoothstep(gw * 0.25, gw, d));
 	float r = v_a.w;
-	float soft = 0.0;
-	if (r > 0.0) {
-		soft = (1.0 - smoothstep(r * 0.3, r + u_track.z, d)) * min(1.0, r / 1.4);
-	}
-	o = vec4(film, ghost, soft, 0.0);
+	float g = max(d - 0.5 * r, 0.0) / (0.5 * r + 0.45 * u_track.z);
+	float soft = r > 0.0 ? exp(-g * g) * min(1.0, r / 1.4) : 0.0;
+	o = vec4(v_a.y * k, ghost, soft, v_young * k);
 }`
 
 	const VS_EXPLORED = `#version 300 es
@@ -250,8 +255,10 @@ uniform float u_reach;
 out vec2 v_local;
 flat out float v_len;
 flat out float v_born;
+flat out vec2 v_arrival;
 void main() {
 	v_born = a_dyn.y;
+	v_arrival = a_aux.xy;
 	if (a_dyn.y <= u_bornAfter || a_dyn.x < 0.0) {
 		gl_Position = NOWHERE;
 		return;
@@ -269,43 +276,49 @@ precision highp float;
 in vec2 v_local;
 flat in float v_len;
 flat in float v_born;
+flat in vec2 v_arrival;
 uniform float u_reach;
 out vec4 o;
+// r: how surely the slime has been here, g: when, b: how far it crawled to get here
 void main() {
-	float d = length(vec2(v_local.x - clamp(v_local.x, 0.0, v_len), v_local.y));
+	float t = clamp(v_local.x, 0.0, v_len);
+	float d = length(vec2(v_local.x - t, v_local.y));
 	float k = 1.0 - smoothstep(u_reach * 0.3, u_reach, d);
-	o = vec4(k, k > 0.3 ? v_born : 0.0, 0.0, 0.0);
+	float arrival = mix(v_arrival.x, v_arrival.y, v_len > 0.0 ? t / v_len : 0.0);
+	o = vec4(k, k > 0.3 ? v_born : 0.0, k > 0.3 ? arrival : 0.0, 0.0);
 }`
 
 	const FS_DISH = `#version 300 es
 precision highp float;
 uniform sampler2D u_tubes; // screen size: distance to wall, height, radius, granules * height
-uniform sampler2D u_track; // map size: fresh film, withered marks, soft tubes
-uniform sampler2D u_explored; // map size: where the slime has been, and when it got there
-uniform float u_time;
-uniform float u_wetFade;
+uniform sampler2D u_track; // half map size, with mipmaps: sheet, withered marks, soft tubes, growing margin
+uniform sampler2D u_explored; // map size: where the slime has been, when, and how far it crawled
 uniform sampler2D u_env; // map size: light you shine, parkland, outside the city, mottling
 uniform sampler2D u_noise;
 uniform vec2 u_canvas;
 uniform vec2 u_sim;
 uniform vec4 u_view; // map point at the centre of the canvas, device px per map px
-uniform float u_dark;
 uniform float u_tap; // device px from the centre to each of four smoothing taps
 uniform float u_margin;
 uniform float u_rMax;
+uniform float u_time;
+uniform float u_wetFade;
+uniform vec4 u_beat; // pulse rate, pulse wavenumber, clock, motion
+uniform vec4 u_glass; // gap between map edge and glass, wall, hairline (device px), 0
 uniform vec3 u_bench, u_rim, u_dish, u_park, u_outside, u_light, u_trace, u_slime, u_core;
 out vec4 o;
 
-// towards the lamp, in map coordinates (y down): up and a little left
-const vec2 LAMP = vec2(-0.47, -0.88);
+// towards the light, in map coordinates (y down): up and to the left
+const vec2 LAMP = vec2(-0.6, -0.8);
 
 vec3 screen(vec3 a, vec3 b) {
 	return 1.0 - (1.0 - a) * (1.0 - b);
 }
 
-float band(float x, float centre, float width) {
-	float t = (x - centre) / width;
-	return exp(-t * t);
+// how much of a pixel px wide a line w wide covers, d from its middle
+float hairline(float d, float w, float px) {
+	float a = max(-0.5 * w, d - 0.5 * px), b = min(0.5 * w, d + 0.5 * px);
+	return clamp((b - a) / px, 0.0, 1.0);
 }
 
 void main() {
@@ -318,63 +331,56 @@ void main() {
 	vec2 c = p - 0.5 * u_sim;
 	float rr = length(c);
 	vec2 outward = c / max(rr, 1e-3);
-	float R = 0.5 * min(u_sim.x, u_sim.y);
-	float wall = 0.016 * R;
-	float inner = R - wall;
-	float facing = dot(outward, LAMP); // +1 on the side of the dish nearest the lamp
+	float R = 0.5 * min(u_sim.x, u_sim.y) - u_glass.x; // outer edge of the glass
+	float inner = R - u_glass.y; // inner edge of the glass, where the agar ends
+	float facing = dot(outward, LAMP); // +1 on the side of the dish nearest the light
+	float hair = max(u_glass.z * px, 0.35); // hairline, map px
 
-	// --- the agar, lit through the mask ---------------------------------------
+	// --- the agar, lit through the mask: brighter means more light ------------
 	vec4 env = texture(u_env, puv);
-	vec4 spread = textureLod(u_env, puv, 4.0);
+	vec4 far = textureLod(u_env, puv, 4.5);
 	vec3 agar = mix(u_dish, u_park, env.g);
 	agar = mix(agar, u_outside, env.b);
-	// light scatters a little way into the agar in the shade
-	float spill = max(spread.b - env.b, 0.0) + 0.4 * max(spread.g - env.g, 0.0);
-	agar = mix(agar, u_outside, spill * mix(0.3, 0.55, u_dark));
-	// light you shine: the agar under it lit like the agar outside the city,
-	// brightest in the middle, with a glow that spreads around it
+	// light scatters in the agar: a faint cool haze over what is lit
+	vec3 cool = mix(u_outside, u_light, 0.65);
+	agar += cool * (0.07 * far.b * far.b + 0.03 * far.g);
+	// light you shine: a pool of it, with a soft bloom around
 	float lamp = smoothstep(0.0, 0.9, textureLod(u_env, puv, 1.2).r);
-	float halo = 0.45 * textureLod(u_env, puv, 3.0).r + 0.3 * spread.r + 0.4 * textureLod(u_env, puv, 5.0).r;
-	agar = mix(agar, u_outside, lamp * 0.85);
-	agar = screen(agar, u_light * (0.3 * lamp * lamp + mix(0.3, 0.42, u_dark) * halo));
-	float grain = texture(u_noise, p * 0.011).r - 0.5;
-	agar *= 1.0 + mix(0.05, 0.08, u_dark) * (env.a - 0.5) + mix(0.035, 0.05, u_dark) * grain;
-	// the agar climbs the glass a little at the edge
+	float bloom = 0.5 * textureLod(u_env, puv, 3.0).r + 0.5 * far.r;
+	agar = mix(agar, u_light, lamp * 0.85);
+	agar += u_light * bloom * 0.28;
+	// a very fine grain, and the faintest unevenness
+	float grain = texture(u_noise, p * 0.021).r - 0.5;
+	agar += vec3(0.011 * grain + 0.007 * (env.a - 0.5));
+	// the agar darkens where it meets the glass
 	float m = inner - rr;
-	agar *= 1.0 - 0.05 * smoothstep(0.55 * R, inner, rr) - mix(0.07, 0.0, u_dark) * exp(-max(m, 0.0) / 4.0);
-	agar = screen(agar, vec3(mix(0.3, 0.22, u_dark) * band(m, 1.4, 0.6 + px)) * mix(u_outside, vec3(1.0), 0.5));
+	agar *= 1.0 - 0.3 * exp(-max(m, 0.0) / 9.0);
 
-	// --- where the slime has been --------------------------------------------
-	// the edge of where it has been, softened and lobed
+	// --- the slime ----------------------------------------------------------
+	vec3 ew = textureLod(u_explored, uv, 1.6).rgb;
 	float lobe = texture(u_noise, p * 0.0036).g - 0.5;
-	float ex = textureLod(u_explored, uv, 1.6).r + 0.3 * lobe;
-	float explored = smoothstep(0.42, 0.58, ex);
-	// slime the organism has just left is still wet; it dries to a faint track
+	float explored = smoothstep(0.42, 0.58, ew.r + 0.3 * lobe);
 	float wet = exp(-max(u_time - textureLod(u_explored, uv, 2.5).g, 0.0) / u_wetFade);
-	vec4 tr = texture(u_track, uv);
-	agar = mix(agar, u_trace, explored * mix(0.16 + 0.34 * wet, 0.42 + 0.2 * wet, u_dark));
-	agar = mix(agar, mix(u_trace, u_core, 0.3), tr.g * 0.45);
-	// the fresh sheet at the growing edge: one film at the very front; behind
-	// it holes open up and it becomes a lace of fine veins, which fades
-	float fresh = tr.r * explored;
-	float cellsLace = texture(u_noise, p * (1.0 / 200.0)).a * 4.0; // map px / 1.75 to a cell border
-	float veinW = mix(0.12, 0.5, smoothstep(0.05, 0.7, fresh)) / 1.75;
-	float lace = 1.0 - smoothstep(veinW - 0.6 * px, veinW + 0.6 * px, cellsLace);
-	float sheet = smoothstep(0.45, 0.95, fresh + 0.25 * lobe);
-	float veins = lace * smoothstep(0.03, 0.35, fresh);
-	float front = fresh * (1.0 - smoothstep(0.62, 0.9, ex));
-	vec3 film = mix(u_trace, u_slime, 0.55);
-	agar = mix(agar, film, max(sheet * 0.5, veins * 0.62));
-	agar = mix(agar, mix(u_slime, u_core, 0.25), front * 0.45);
+	// the track it leaves, barely there
+	agar = mix(agar, u_trace, explored * (0.65 + 0.35 * wet));
+	// the slow pulse that runs out from where it started, through all of it
+	float beat = u_beat.w * cos(u_beat.z * u_beat.x - ew.b * u_beat.y) * explored;
+	vec4 tr = mix(textureLod(u_track, uv, 0.7), textureLod(u_track, uv, 1.8), 0.45);
+	vec3 gold = u_slime;
+	vec3 hot = u_core;
+	agar += gold * tr.g * 0.03; // marks of tubes that withered
+	// the sheet it spreads as: a veil of light, brightest at the growing margin
+	float sheet = smoothstep(0.03, 0.95, tr.r) * explored;
+	float young = smoothstep(0.0, 0.8, tr.a) * explored;
+	vec3 veil = mix(gold, hot, 0.2);
+	float glowSheet = textureLod(u_track, uv, 3.0).r * explored;
+	agar += mix(gold, hot, 0.3 * sheet) * (0.2 * sheet + 0.22 * young * young) * (1.0 + 0.2 * beat);
+	agar = screen(agar, gold * 0.1 * glowSheet * glowSheet);
+	// light from the tubes: a close glow and a wide one
+	float near = textureLod(u_track, uv, 1.3).b;
+	float wide = textureLod(u_track, uv, 3.4).b;
+	agar = screen(agar, gold * (0.3 * near + 0.3 * wide) * (1.0 + 0.12 * beat));
 
-	// shadow of the tubes, away from the lamp; in the dark they glow instead
-	vec2 sp = p + LAMP * 2.4;
-	float shade = texture(u_track, vec2(sp.x / u_sim.x, 1.0 - sp.y / u_sim.y)).b;
-	vec3 tint = mix(vec3(1.0), u_slime, 0.45) * 0.8;
-	agar *= mix(vec3(1.0), tint, shade * shade * 0.6 * (1.0 - u_dark));
-	agar += u_dark * mix(u_slime, u_core, 0.3) * tr.b * tr.b * 0.42;
-
-	// --- the tubes -----------------------------------------------------------
 	vec3 col = agar;
 	vec4 T = texelFetch(u_tubes, ivec2(frag), 0);
 	if (T.r > 0.02 - u_margin) {
@@ -387,54 +393,56 @@ void main() {
 		float cover = max(clamp(T.r + 0.5, 0.0, 1.0), clamp(soft + 0.3, 0.0, 1.0));
 		float rpx = max(T.b, max(max(A.b, B.b), max(C.b, D.b)));
 		float rs = rpx * px; // the tube's radius, map px
-		// the surface, from the height of the cross-sections around
 		vec2 slope = vec2(B.g + D.g - A.g - C.g, C.g + D.g - A.g - B.g) / (4.0 * u_tap);
 		vec3 n = normalize(vec3(-slope * 0.85, 1.0));
-		vec3 L = normalize(vec3(LAMP.x, -LAMP.y, 1.1));
-		vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
-		float q = clamp(1.0 - T.r / max(rpx, 0.8), 0.0, 1.0); // 0 on the ridge, 1 at the wall
-		float thick = smoothstep(0.45, u_rMax * 0.95, rs);
-
-		vec3 deep = mix(u_core, u_slime * vec3(1.06, 0.8, 0.3), u_dark);
-		vec3 body = mix(u_slime, deep, thick * 0.85);
-		vec3 lumen = mix(screen(body, mix(u_slime, vec3(1.0), 0.55) * 0.42), mix(body, u_core, 0.25 + 0.6 * thick), u_dark);
-		vec3 wallCol = mix(body, body * body, 0.55) * 0.9;
-		vec3 tube = mix(lumen, body, smoothstep(0.05, 0.65, q));
-		tube = mix(tube, wallCol, smoothstep(0.5, 1.0, q) * (0.3 + 0.55 * thick));
+		vec3 H = normalize(normalize(vec3(LAMP.x, -LAMP.y, 1.2)) + vec3(0.0, 0.0, 1.0));
+		float q = clamp(1.0 - T.r / max(rpx, 0.8), 0.0, 1.0); // 0 along the middle, 1 at the wall
+		float thick = smoothstep(0.35, u_rMax, rs);
+		// light: gold, with a hot line along the middle of the thicker tubes
+		float core = pow(max(1.0 - q * q, 0.0), 4.0);
+		vec3 tube = gold * mix(0.72, 1.0, thick) * (1.0 - 0.28 * q * q);
+		tube = mix(tube, hot, core * mix(0.2, 0.85, thick));
+		// packets of light streaming along
 		float grains = T.a / max(T.g, 1e-3);
-		tube *= 1.0 + 0.18 * (grains - 0.5) * (1.0 - q * q) * smoothstep(0.8, 2.0, rs);
-		tube *= 0.9 + 0.12 * clamp(dot(n, L), 0.0, 1.0);
-
-		float alpha = cover * (1.0 - exp(-(0.45 + 1.5 * rs)));
-		alpha *= 1.0 - 0.22 * pow(q, 4.0) * thick;
+		tube *= 1.0 + 0.16 * (grains - 0.5) * smoothstep(0.5, 1.5, rs);
+		tube *= 1.0 + 0.1 * beat;
+		float alpha = cover * (1.0 - exp(-(0.8 + 2.0 * rs))) * (1.0 - 0.5 * pow(q, 2.5));
 		col = mix(agar, tube, alpha);
-		float spec = pow(max(dot(n, H), 0.0), 36.0) * smoothstep(0.9, 2.2, rs);
-		col = screen(col, mix(vec3(1.0), u_light, 0.4) * spec * cover * mix(0.6, 0.38, u_dark));
+		// the wet skin catches the light, just
+		float spec = pow(max(dot(n, H), 0.0), 60.0) * smoothstep(1.0, 2.6, rs);
+		col = screen(col, vec3(0.86, 0.92, 1.0) * spec * cover * 0.2);
 	}
-	// light you shine bleaches the slime a little too
-	col = mix(col, screen(col, u_light * 0.4), lamp);
+	// light you shine pales the slime a little
+	col = mix(col, screen(col, u_light * 0.3), lamp);
 
-	// --- glass and bench -----------------------------------------------------
-	float x = clamp((rr - inner) / wall, 0.0, 1.0); // across the glass wall, inside to out
-	float wpx = wall / px; // the wall in device px
-	vec3 glass = mix(u_rim, u_outside, 0.25 + 0.2 * u_dark);
-	glass *= 1.0 - 0.22 * (band(x, 0.0, 1.2 / wpx + 0.06) + band(x, 1.0, 1.2 / wpx + 0.05));
-	float lit1 = band(x, 0.64, 0.9 / wpx + 0.08) * (0.2 + 0.8 * pow(max(facing, 0.0), 2.0));
-	float lit2 = band(x, 0.3, 0.8 / wpx + 0.06) * pow(max(-facing, 0.0), 3.0);
-	glass = screen(glass, mix(vec3(1.0), u_light, 0.5) * (0.8 * lit1 + 0.35 * lit2) * mix(1.0, 0.75, u_dark));
-	glass = screen(glass, u_outside * mix(0.0, 0.35, u_dark) * band(x, 0.5, 0.45));
-
-	float out1 = rr - R;
-	float rs2 = length(c - vec2(3.0, 5.5)) - R; // the dish's shadow, away from the lamp
-	vec3 bench = u_bench * (1.0 - (1.0 - u_dark) * (0.2 * exp(-max(rs2, 0.0) / 12.0) + 0.16 * exp(-max(out1, 0.0) / 1.8)));
-	bench *= 1.0 - u_dark * 0.35 * exp(-max(out1, 0.0) / 2.5);
-	bench += u_dark * u_outside * 0.16 * exp(-max(out1, 0.0) / 14.0);
-
+	// --- the glass: a machined ring ----------------------------------------
+	// seen from above the wall is a dark band; a faint light lives in it
+	float x = clamp((rr - inner) / (R - inner), 0.0, 1.0);
+	vec3 glass = mix(u_bench, u_rim, 0.12 + 0.06 * (1.0 - x));
 	float kGlass = smoothstep(inner - 0.5 * px, inner + 0.5 * px, rr);
-	float kBench = smoothstep(R - 0.5 * px, R + 0.5 * px, rr);
-	vec3 outc = mix(mix(col, glass, kGlass), bench, kBench);
-	outc += (fract(52.9829189 * fract(dot(frag, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;
-	o = vec4(outc, 1.0);
+	vec3 inside = mix(col, glass, kGlass);
+	// a faint sheen on the lid, towards the light
+	inside = screen(inside, vec3(0.022 * smoothstep(0.1, 1.0, facing) * smoothstep(0.3 * R, R, rr)));
+	// hairlines: the outer edge bright, where the light catches it brightest;
+	// the inner edge faint, with a faint reflection on the far side
+	float arc = smoothstep(0.3, 1.0, facing);
+	float outerLine = hairline(rr - (R - 0.5 * hair), hair, px);
+	float innerLine = hairline(rr - (inner + 0.5 * hair), hair, px);
+	float echo = hairline(rr - (inner - 3.0 * hair), hair, px) * smoothstep(0.35, 1.0, -facing);
+	float white = outerLine * (0.16 + 0.55 * arc) + innerLine * (0.07 + 0.08 * arc) + echo * 0.07;
+	inside = mix(inside, vec3(1.0), white);
+
+	// outside the glass the page shows through: only the dish's contact shadow
+	// and the faintest light around the rim
+	float d = rr - R;
+	float shadowA = 0.55 * (1.0 - smoothstep(0.0, u_glass.x, d)) * (0.85 + 0.15 * smoothstep(-1.0, 0.2, facing));
+	float halo = 0.045 * exp(-max(d, 0.0) / (hair + 1.5 * px));
+	vec4 outer = vec4(u_bench * shadowA + vec3(halo), min(1.0, shadowA + halo));
+	float kDisc = 1.0 - smoothstep(R - 0.5 * px, R + 0.5 * px, rr);
+	vec4 res = mix(outer, vec4(inside, 1.0), kDisc);
+	// dither away the banding in the dark gradients
+	res.rgb += (fract(52.9829189 * fract(dot(frag, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0 * res.a;
+	o = vec4(clamp(res.rgb, 0.0, res.a), res.a);
 }`
 
 	// --- Helpers -----------------------------------------------------------------
@@ -503,12 +511,13 @@ void main() {
 
 	class DishRenderer {
 		constructor(canvas, {width = 1024, height = 1024} = {}) {
+			// transparent outside the glass, so the page shows through
 			const gl = canvas.getContext('webgl2', {
-				alpha: false,
+				alpha: true,
 				antialias: false,
 				depth: false,
 				stencil: false,
-				premultipliedAlpha: false,
+				premultipliedAlpha: true,
 				preserveDrawingBuffer: false,
 				powerPreference: 'high-performance',
 			})
@@ -562,8 +571,10 @@ void main() {
 			this.exploredTex = this.texture(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, width, height, {mipmaps: true})
 			this.exploredFbo = this.framebuffer(this.exploredTex)
 			gl.generateMipmap(gl.TEXTURE_2D)
-			this.trackTex = this.texture(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, width, height)
+			this.trackSize = [Math.ceil(width / 2), Math.ceil(height / 2)]
+			this.trackTex = this.texture(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, this.trackSize[0], this.trackSize[1], {mipmaps: true})
 			this.trackFbo = this.framebuffer(this.trackTex)
+			gl.generateMipmap(gl.TEXTURE_2D)
 			this.tubeTex = null
 			this.tubeFbo = null
 			this.tubeSize = [0, 0]
@@ -582,7 +593,7 @@ void main() {
 			this.snap = true
 			this.exploredAfter = -1
 			this.exploredClear = true
-			this.Dref = 0.4
+			this.maxD = 0
 			this.cpuMs = 0
 			this.viewOut = new Float64Array(6)
 			this.clearTubes = new Float32Array(4)
@@ -977,8 +988,6 @@ void main() {
 			this.modelTime = net.time
 			const k = this.snap ? 1 : Math.max(1 - Math.exp(-dt / P.smoothing), 1 - Math.exp(-modelDt / P.smoothingModel))
 			const keep = Math.exp(-modelDt / P.ghostFade)
-			const Dref = this.Dref
-			const rhoCut = Math.sqrt(Math.sqrt(P.witheredD / Dref))
 			const clock = this.clockNow
 			const omega = (2 * Math.PI) / P.pulse
 			const waveK = (2 * Math.PI) / P.wave
@@ -998,9 +1007,8 @@ void main() {
 				const mean = (qMean[e] += (Q - qMean[e]) * k)
 				const mag = (qAbs[e] += (Math.abs(Q) - qAbs[e]) * k)
 				const carries = smoothstep(P.flowLow, P.flowHigh, mag)
-				const rho = Math.sqrt(Math.sqrt(Math.max(d, 0) / Dref))
 				const mature = smoothstep(P.matureFrom, P.matureBy, net.time - born[e])
-				const size = carries * mature * Math.pow(rho, P.contrast) * smoothstep(rhoCut, rhoCut * 1.9, rho)
+				const size = carries * mature * Math.pow(Math.max(d, 0) / P.refD, P.contrast) * smoothstep(P.veinD, P.veinD * 2.8, d)
 				sizes[e] = size
 				const g = Math.max(ghost[e] * keep, Math.min(1, size))
 				ghost[e] = g
@@ -1020,8 +1028,7 @@ void main() {
 				dynU[o * 2 + 6] = carries * 65535
 				dynU[o * 2 + 7] = g * 65535
 			}
-			const target = Math.max(maxD, (net.params && net.params.fresh) || 0.05, 1e-3)
-			this.Dref = this.snap ? target : Dref + (target - Dref) * k
+			this.maxD = maxD
 			// nodes glide to smoothed places, unless nothing may move or the model jumped ahead
 			this.smoothPaths(count, this.snap || still || modelDt > 0.5)
 			this.snap = false
@@ -1077,11 +1084,9 @@ void main() {
 			gl.uniform1f(u.u_time, this.net.time)
 			gl.uniform1f(u.u_clock, this.clockNow)
 			gl.uniform1f(u.u_motion, motion)
-			const rhoRef = Math.sqrt(Math.sqrt(this.Dref))
-			gl.uniform4f(u.u_tube, P.tubeRadius, rhoRef, Math.sqrt(Math.sqrt(P.witheredD / this.Dref)), P.freshRadius)
-			gl.uniform4f(u.u_life, P.veinFade, P.breathe, (2 * Math.PI) / P.pulse, (2 * Math.PI) / P.wave)
+			gl.uniform4f(u.u_tube, P.tubeRadius, P.refD, P.veinD, P.contrast)
+			gl.uniform4f(u.u_life, P.youthFade, P.breathe, (2 * Math.PI) / P.pulse, (2 * Math.PI) / P.wave)
 			gl.uniform2f(u.u_mature, P.matureFrom, P.matureBy)
-			gl.uniform1f(u.u_contrast, P.contrast)
 		}
 
 		// seconds: a clock for the slow life in the tubes. {still: true} holds
@@ -1120,6 +1125,7 @@ void main() {
 				this.exploredMips = true
 			}
 			gl.bindFramebuffer(gl.FRAMEBUFFER, this.trackFbo)
+			gl.viewport(0, 0, this.trackSize[0], this.trackSize[1])
 			gl.clearColor(0, 0, 0, 0)
 			gl.clear(gl.COLOR_BUFFER_BIT)
 
@@ -1127,13 +1133,13 @@ void main() {
 				gl.bindVertexArray(this.vao)
 				gl.enable(gl.BLEND)
 				gl.blendEquation(gl.MAX)
-				gl.viewport(0, 0, this.width, this.height)
 
 				// 1. everywhere the slime has been, adding what grew since last time
 				const time = Math.fround(net.time)
 				if (time > this.exploredAfter) {
 					const ex = this.programs.explored
 					gl.bindFramebuffer(gl.FRAMEBUFFER, this.exploredFbo)
+					gl.viewport(0, 0, this.width, this.height)
 					gl.useProgram(ex.p)
 					this.setInstanceUniforms(ex, 1, 0)
 					gl.uniform1f(ex.u.u_bornAfter, this.exploredAfter)
@@ -1143,14 +1149,19 @@ void main() {
 					this.exploredMips = true
 				}
 
-				// 2. fresh sheet, withered marks, soft tubes
+				// 2. the sheet, the growing margin, withered marks, soft tubes
 				const tr = this.programs.track
 				gl.bindFramebuffer(gl.FRAMEBUFFER, this.trackFbo)
+				gl.viewport(0, 0, this.trackSize[0], this.trackSize[1])
 				gl.useProgram(tr.p)
 				this.setInstanceUniforms(tr, 1, 0)
-				gl.uniform4f(tr.u.u_track, P.filmRadius, P.filmFade, 4, 0)
+				gl.uniform4f(tr.u.u_track, P.sheetRadius, P.sheetD, 4, P.sheetFloor)
 				gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.instances)
 			}
+			// the glow is made from blurred copies of the soft tubes
+			gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+			gl.bindTexture(gl.TEXTURE_2D, this.trackTex)
+			gl.generateMipmap(gl.TEXTURE_2D)
 
 			if (this.exploredMips) {
 				gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -1194,12 +1205,13 @@ void main() {
 			gl.uniform2f(d.u.u_canvas, w, h)
 			gl.uniform2f(d.u.u_sim, this.width, this.height)
 			gl.uniform4f(d.u.u_view, cx, cy, scale, 0)
-			gl.uniform1f(d.u.u_dark, pal.dark ? 1 : 0)
 			gl.uniform1f(d.u.u_tap, tap)
 			gl.uniform1f(d.u.u_margin, margin)
 			gl.uniform1f(d.u.u_rMax, P.tubeRadius)
 			gl.uniform1f(d.u.u_time, net ? net.time : 0)
 			gl.uniform1f(d.u.u_wetFade, P.wetFade)
+			gl.uniform4f(d.u.u_beat, (2 * Math.PI) / P.pulse, (2 * Math.PI) / P.wave, this.clockNow, still ? 0 : 1)
+			gl.uniform4f(d.u.u_glass, P.rimInset, P.wall, Math.max(1, 0.75 * scale), 0)
 			for (let i = 0; i < COLORS.length; i++) gl.uniform3fv(d.u[COLOR_UNIFORMS[i]], pal[COLORS[i]])
 			gl.bindVertexArray(this.emptyVao)
 			gl.drawArrays(gl.TRIANGLES, 0, 3)
@@ -1214,31 +1226,23 @@ void main() {
 			const P = this.params
 			const E = this.edgeCount
 			const scale = Math.min(this.tubeSize[0] / this.width, this.tubeSize[1] / this.height) || 1
-			const rhoRef = Math.sqrt(Math.sqrt(this.Dref))
-			const rhoCut = Math.sqrt(Math.sqrt(P.witheredD / this.Dref))
-			let grown = 0, tubes = 0, veins = 0, fragments = 0
+			let grown = 0, tubes = 0, sheet = 0, fragments = 0
 			for (let e = 0; e < E; e++) {
 				const o = e * 4
 				const d = this.dynF[o]
 				if (d < 0) continue
 				grown++
+				if (d > P.sheetFloor * 4) sheet++
 				const age = Math.max(0, net.time - this.dynF[o + 1])
 				const carries = this.dynU[o * 2 + 6] / 65535
-				const rho = Math.sqrt(Math.sqrt(d)) / rhoRef
-				const rNet = P.tubeRadius * Math.pow(rho, P.contrast) * smoothstep(rhoCut, rhoCut * 1.9, rho)
-				const len = Math.hypot(this.geo[o + 2] - this.geo[o], this.geo[o + 3] - this.geo[o + 1])
-				const along = Math.min(1, Math.abs(this.aux[o + 1] - this.aux[o]) / Math.max(len, 1e-3))
-				const seed = this.aux[o + 2]
-				const keep = (seed * 7.31) % 1 <= 0.06 + 0.55 * smoothstep(0.72, 0.97, along) ? 1 : 0
-				const vein = P.freshRadius * keep * (0.6 + 0.5 * ((seed * 3.7) % 1)) * Math.exp(-age / P.veinFade) * smoothstep(0.25, 0.9, age)
-				const r = Math.max(vein, rNet * carries * smoothstep(P.matureFrom, P.matureBy, age))
+				const r = P.tubeRadius * Math.pow(d / P.refD, P.contrast) * smoothstep(P.veinD, P.veinD * 2.8, d) * carries * smoothstep(P.matureFrom, P.matureBy, age)
 				if (r * scale < 0.04) continue
-				if (r > vein) tubes++
-				else veins++
-				const ext = Math.max(r * scale, P.minPx) + Math.min(2, Math.max(1, 0.8 * scale)) + 2
+				tubes++
+				const len = Math.hypot(this.geo[o + 2] - this.geo[o], this.geo[o + 3] - this.geo[o + 1])
+				const ext = Math.max(r * scale, P.minPx) * 1.1 + Math.min(3.5, Math.max(1, 0.8 * scale)) + 2
 				fragments += (len * scale + 2 * ext) * 2 * ext
 			}
-			return {grown, tubes, veins, tubeFragments: Math.round(fragments), instances: this.instances, Dref: this.Dref, cpuMs: this.cpuMs}
+			return {grown, tubes, sheet, tubeFragments: Math.round(fragments), instances: this.instances, maxD: this.maxD, cpuMs: this.cpuMs}
 		}
 	}
 

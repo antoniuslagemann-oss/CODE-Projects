@@ -10,13 +10,16 @@
 		margin: 0;
 		height: 100%;
 		overflow: hidden;
-		background: var(--bench);
+		background: #050606;
 	}
+	/* the page behind the dish: black with an ambient amber glow, which the
+	   transparent canvas lets through */
 	#stage {
 		position: relative;
 		width: var(--size, min(100vw, 100vh));
 		height: var(--size, min(100vw, 100vh));
 		touch-action: none;
+		background: radial-gradient(closest-side, rgba(255, 176, 60, 0.13), rgba(255, 176, 60, 0.04) 70%, transparent);
 	}
 	#stage canvas {
 		position: absolute;
@@ -39,11 +42,11 @@
 <body>
 <!--
 	Render demo for DishRenderer, without the rest of the page.
-	  ?dark        dark theme
+	  ?light       the page's light tokens instead of the dark glass palette
 	  ?manual      don't run on its own (tests call window.demo)
 	  ?size=800    dish size in css px
 	  ?steps=600   run the model this far before the first frame
-	  ?light       shine a lamp on part of the dish
+	  ?lamp        shine a lamp on part of the dish
 	Wheel to zoom, drag to pan. Keys: space pause, d theme, 0 reset view.
 -->
 <div id="stage"><canvas id="gl"></canvas><canvas id="overlay"></canvas></div>
@@ -141,8 +144,14 @@
 
 	// --- colours, from the page's own tokens -----------------------------------
 
-	let dark = query.has('dark')
-	let override = {}
+	let dark = !query.has('light')
+	// the dark glass palette the page hands over
+	let override = {
+		dark: {
+			bench: '#050606', rim: '#6f7479', dish: '#0a0c0b', park: '#121614', outside: '#1b2127',
+			light: '#3a4658', trace: '#17130a', slime: '#ffc53d', core: '#ffebb0',
+		},
+	}
 	let colors = {}
 	function readPalette() {
 		document.documentElement.dataset.theme = dark ? 'dark' : 'light'
@@ -263,6 +272,18 @@
 		out.height = Math.round(ch * k)
 		const ctx = out.getContext('2d')
 		ctx.imageSmoothingEnabled = k < 1
+		// the page behind: black, and the amber glow around the dish
+		ctx.fillStyle = '#050606'
+		ctx.fillRect(0, 0, out.width, out.height)
+		const m = DishRenderer.viewMatrix(view, glCanvas.width, glCanvas.height, SIM, SIM)
+		const sx = out.width / cw
+		const gx = (m[4] + (SIM / 2) * m[0] - cx) * sx, gy = (m[5] + (SIM / 2) * m[3] - cy) * sx
+		const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, (SIM / 2) * m[0] * sx)
+		glow.addColorStop(0, 'rgba(255, 176, 60, 0.13)')
+		glow.addColorStop(0.7, 'rgba(255, 176, 60, 0.04)')
+		glow.addColorStop(1, 'rgba(255, 176, 60, 0)')
+		ctx.fillStyle = glow
+		ctx.fillRect(0, 0, out.width, out.height)
 		ctx.drawImage(glCanvas, cx, cy, cw, ch, 0, 0, out.width, out.height)
 		ctx.drawImage(overlay, cx, cy, cw, ch, 0, 0, out.width, out.height)
 		return {png: out.toDataURL('image/png'), ms, stats: renderer.stats()}
@@ -270,7 +291,7 @@
 
 	const initial = Number(query.get('steps')) || 0
 	if (initial) step(initial)
-	if (query.has('light')) {
+	if (query.has('lamp')) {
 		// a lamp over Tempelhofer Feld and a stroke of light towards the east
 		for (let i = 0; i <= 12; i++) renderer.paintLight(560 + i * 9, 600 - i * 4, 1 * PX_PER_KM, 0.35)
 	}
@@ -291,7 +312,7 @@
 			readPalette()
 		},
 		setPalette(p) {
-			override = p || {}
+			if (p) override = p
 			readPalette()
 		},
 		setView(v) {
