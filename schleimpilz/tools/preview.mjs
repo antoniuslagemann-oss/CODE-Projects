@@ -412,12 +412,16 @@ function addFlake() {
 	})
 }
 function shineLight() {
-	// over the busiest tube that is well away from every flake
+	// over the busiest tube that is well away from every flake, in the middle
+	// of town where the slime has other ways to go
 	const r = 2 * PX_PER_KM
+	const living = net.flakes.filter((f) => f.alive && f.node >= 0)
+	const cx = living.reduce((s, f) => s + net.x[f.node], 0) / living.length, cy = living.reduce((s, f) => s + net.y[f.node], 0) / living.length
 	let best = -1, score = 0
 	for (let e = 0; e < net.edgeCount; e++) {
 		const mx = (net.x[net.a[e]] + net.x[net.b[e]]) / 2, my = (net.y[net.a[e]] + net.y[net.b[e]]) / 2
-		if (net.flakes.some((f) => f.alive && f.node >= 0 && Math.hypot(net.x[f.node] - mx, net.y[f.node] - my) < r + 1.2 * PX_PER_KM)) continue
+		if (Math.hypot(mx - cx, my - cy) > 8 * PX_PER_KM) continue
+		if (living.some((f) => Math.hypot(net.x[f.node] - mx, net.y[f.node] - my) < r + 1.2 * PX_PER_KM)) continue
 		const s = net.D[e] * net.flow[e]
 		if (s > score) (score = s), (best = e)
 	}

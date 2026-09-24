@@ -334,7 +334,7 @@ void main() {
 	// light you shine: the agar under it lit like the agar outside the city,
 	// brightest in the middle, with a glow that spreads around it
 	float lamp = smoothstep(0.0, 0.9, textureLod(u_env, puv, 1.2).r);
-	float halo = 0.55 * textureLod(u_env, puv, 3.0).r + 0.45 * spread.r;
+	float halo = 0.45 * textureLod(u_env, puv, 3.0).r + 0.3 * spread.r + 0.4 * textureLod(u_env, puv, 5.0).r;
 	agar = mix(agar, u_outside, lamp * 0.85);
 	agar = screen(agar, u_light * (0.3 * lamp * lamp + mix(0.3, 0.42, u_dark) * halo));
 	float grain = texture(u_noise, p * 0.011).r - 0.5;
@@ -345,13 +345,12 @@ void main() {
 	agar = screen(agar, vec3(mix(0.3, 0.22, u_dark) * band(m, 1.4, 0.6 + px)) * mix(u_outside, vec3(1.0), 0.5));
 
 	// --- where the slime has been --------------------------------------------
-	vec2 exw = texture(u_explored, uv).rg;
 	// the edge of where it has been, softened and lobed
 	float lobe = texture(u_noise, p * 0.0036).g - 0.5;
 	float ex = textureLod(u_explored, uv, 1.6).r + 0.3 * lobe;
 	float explored = smoothstep(0.42, 0.58, ex);
 	// slime the organism has just left is still wet; it dries to a faint track
-	float wet = exp(-max(u_time - exw.g, 0.0) / u_wetFade);
+	float wet = exp(-max(u_time - textureLod(u_explored, uv, 2.5).g, 0.0) / u_wetFade);
 	vec4 tr = texture(u_track, uv);
 	agar = mix(agar, u_trace, explored * mix(0.16 + 0.34 * wet, 0.42 + 0.2 * wet, u_dark));
 	agar = mix(agar, mix(u_trace, u_core, 0.3), tr.g * 0.45);
