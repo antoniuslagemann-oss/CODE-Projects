@@ -213,10 +213,11 @@ const DishUI = (() => {
 
 		// --- names, placed so they sit neither on each other nor on a flake ---
 		const placed = flakeAt.filter(Boolean).map(([x, y]) => [x - R - 2, y - R - 2, 2 * R + 4, 2 * R + 4])
-		const fontSize = Math.round(10.5 * Math.min(1.1, Math.max(0.92, z)) * 2) / 2
+		const fontSize = Math.max(10, Math.round(10.5 * Math.min(1.1, z) * 2) / 2)
 		const tracking = fontSize * 0.075
 		const free = (lx, ly, w, h) =>
 			lx > 4 && ly > 4 && lx + w < size - 4 && ly + h < size - 4 && inView(lx + w / 2, ly + h / 2, 12) && inView(lx, ly + h / 2, 6) && inView(lx + w, ly + h / 2, 6) && !placed.some((r) => lx < r[0] + r[2] && lx + w > r[0] && ly < r[1] + r[3] && ly + h > r[1])
+		// returns whether it found room
 		const label = (text, x, y, reached) => {
 			ctx.font = `500 ${fontSize}px ${c.mono}`
 			spacing(ctx, tracking)
@@ -237,8 +238,9 @@ const DishUI = (() => {
 				ctx.strokeText(text, lx, ly + h / 2 + 0.5)
 				ctx.fillStyle = reached ? c.text : c.text2
 				ctx.fillText(text, lx, ly + h / 2 + 0.5)
-				return
+				return true
 			}
+			return false
 		}
 
 		// CODE, on a light chip beside its ring
@@ -273,11 +275,12 @@ const DishUI = (() => {
 		}
 
 		if (scene.showNames) {
-			// the flakes come busiest first, so a small dish names the big ones
+			// the flakes come busiest first, so a small dish names the biggest
+			// ones that have room
 			let room = size * scene.zoom > 480 ? Infinity : 10
 			scene.flakes.forEach((f, i) => {
-				if (f.kind !== 'station' || !flakeAt[i] || !onScreen(...flakeAt[i], 0) || room-- <= 0) return
-				label(f.name.toUpperCase(), flakeAt[i][0], flakeAt[i][1], scene.reached.has(i))
+				if (room <= 0 || f.kind !== 'station' || !flakeAt[i] || !onScreen(...flakeAt[i], 0)) return
+				if (label(f.name.toUpperCase(), flakeAt[i][0], flakeAt[i][1], scene.reached.has(i))) room--
 			})
 		}
 		spacing(ctx, 0)
@@ -286,7 +289,7 @@ const DishUI = (() => {
 		const maxBar = size < 480 ? 64 : 96
 		const km = [20, 10, 5, 2, 1, 0.5, 0.2].find((d) => d * scene.pxPerKm * s <= maxBar) || 0.2
 		const barW = km * scene.pxPerKm * s
-		const kmText = km < 1 ? `${Math.round(km * 1000)} m` : `${km} km`
+		const kmText = km < 1 ? `${Math.round(km * 1000)}\u00a0m` : `${km}\u00a0km`
 		if (!showScale(kmText, barW)) {
 			ctx.fillStyle = c.text3
 			ctx.strokeStyle = c.text3
@@ -386,12 +389,15 @@ const DishUI = (() => {
 		alongLabel.append(make('span', 'metric-name', 'Along the rails'))
 		const alongText = make('p', 'along-text')
 		const alongNum = make('b', 'along-num', '–')
-		alongText.append('Built ', alongNum, ' of the real track')
+		const alongSaid = make('span')
+		alongSaid.append('Built ', alongNum, ' of the real track')
+		const alongNone = make('span', 'along-none', 'Not measured yet')
+		alongText.append(alongSaid, alongNone)
 		const alongBar = bar('along')
 		along.append(alongLabel, alongText, alongBar.track)
 		const foot = make('p', 'verdict-wait', WAITING)
 		box.replaceChildren(...rows, along, foot)
-		const panel = {first: rows[0], cells, alongNum, alongFill: alongBar.fill, foot}
+		const panel = {first: rows[0], cells, alongNum, alongSaid, alongNone, alongFill: alongBar.fill, foot}
 		panels.set(box, panel)
 		return panel
 	}
@@ -418,6 +424,8 @@ const DishUI = (() => {
 		}
 		const built = ok && result.overlap && Number.isFinite(result.overlap.railBuilt) ? result.overlap.railBuilt : null
 		panel.alongNum.textContent = built == null ? '–' : `${Math.round(built * 100)}%`
+		panel.alongSaid.hidden = built == null
+		panel.alongNone.hidden = built != null
 		panel.alongFill.style.setProperty('--v', built == null ? '0' : clamp01(built).toFixed(3))
 		// under it all, one plain sentence, or what the panel is waiting for
 		const foot = ok ? result.foot || '' : WAITING
@@ -442,6 +450,12 @@ const DishUI = (() => {
 	// --- The page's own controls ------------------------------------------------------
 
 	function wire() {
+		// how many flakes each setup puts down, from the data
+		for (const el of document.querySelectorAll('[data-count]')) {
+			const list = typeof BERLIN !== 'undefined' ? BERLIN[el.dataset.count] : null
+			if (Array.isArray(list)) el.textContent = String(list.length)
+		}
+
 		const watch = (node, fn) => {
 			new MutationObserver(fn).observe(node, {childList: true, characterData: true, subtree: true})
 			fn()
@@ -449,34 +463,66 @@ const DishUI = (() => {
 
 		// app.js writes "Pause" or "Play" into #play; the icon and the tip follow
 		const play = document.getElementById('play')
+		const live = document.querySelector('.eyebrow')
 		if (play) {
 			watch(play, () => {
-				const paused = play.textContent.trim().toLowerCase() === 'play'
+				const said = play.textContent.trim()
+				const paused = said.toLowerCase() === 'play'
 				const icon = paused ? 'play' : 'pause'
 				if (play.dataset.icon !== icon) {
 					play.dataset.icon = icon
 					play.dataset.tip = paused ? 'Play · Space' : 'Pause · Space'
+					// the live dot rests while the dish does
+					if (live) live.classList.toggle('is-paused', paused)
 				}
+				// its words are drawn at size 0, so they're its name here too
+				if (said && play.getAttribute('aria-label') !== said) play.setAttribute('aria-label', said)
 			})
 		}
 
-		// how far the slime has got, as the hairline over the readings
+		// how far the slime has got, as the share of the flakes other than CODE
+		// it has reached: the hairline over the readings fills with it, and the
+		// light round the lens grows with it
 		const reached = document.getElementById('hud-reached')
 		const fill = document.querySelector('.progress-fill')
+		const dish = document.getElementById('dish')
 		if (reached && fill) {
 			let last = ''
 			watch(reached, () => {
 				const m = /(\d+)\D+(\d+)/.exec(reached.textContent)
-				const p = m && Number(m[2]) > 0 ? clamp01(Number(m[1]) / Number(m[2])).toFixed(3) : '0'
-				if (p !== last) fill.style.setProperty('--p', (last = p))
+				const p = m && Number(m[2]) > 1 ? clamp01((Number(m[1]) - 1) / (Number(m[2]) - 1)).toFixed(3) : '0'
+				if (p === last) return
+				fill.style.setProperty('--p', (last = p))
+				dish?.style.setProperty('--grown', p)
 			})
+		}
+
+		// the lede says where the oat flakes are
+		const tail = document.getElementById('lede-tail')
+		const count = (key) => (typeof BERLIN !== 'undefined' && Array.isArray(BERLIN[key]) ? BERLIN[key].length : null)
+		const TAILS = {
+			hubs: () => `grows toward oat flakes on ${count('hubs') ?? 37} of the city’s busiest stations`,
+			ring: () => `grows toward oat flakes on the ${count('ring') ?? 27} Ringbahn stations`,
+			none: () => 'grows toward the oat flakes you put down',
+		}
+		for (const input of document.querySelectorAll('input[name="setup"]')) {
+			const say = () => {
+				if (input.checked && tail && TAILS[input.value]) tail.textContent = TAILS[input.value]()
+			}
+			input.addEventListener('change', say)
+			say()
 		}
 
 		// popovers: one at a time, and they close on a click elsewhere or Escape
 		const pops = [...document.querySelectorAll('details.pop')]
+		const sheet = matchMedia('(max-width: 860px)')
 		for (const d of pops) {
 			d.addEventListener('toggle', () => {
-				if (d.open) for (const other of pops) if (other !== d) other.open = false
+				if (!d.open) return
+				for (const other of pops) if (other !== d) other.open = false
+				// on a phone the popover is a sheet over the bottom of the screen,
+				// which may hide the button that opened it, so focus goes inside
+				if (sheet.matches) d.querySelector('.pop-panel')?.querySelector('a, button, input, summary')?.focus({preventScroll: true})
 			})
 		}
 		document.addEventListener('pointerdown', (e) => {

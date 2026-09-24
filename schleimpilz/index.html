@@ -16,8 +16,8 @@
 <div class="app">
 	<header class="masthead rise">
 		<p class="eyebrow"><span class="live" aria-hidden="true"></span>Live experiment · Berlin</p>
-		<h1 lang="de">Schleimpilz</h1>
-		<p class="lede">A slime mold designs a transit network for Berlin. It starts at CODE University in Neukölln and grows toward oat flakes on 37 of the city’s busiest stations.</p>
+		<h1 lang="de" translate="no">Schleimpilz</h1>
+		<p class="lede">A slime mold designs a transit network for Berlin. It starts at CODE University in Neukölln and <span id="lede-tail">grows toward oat flakes on 37 of the city’s busiest stations</span>.</p>
 		<p class="source">After <a href="https://doi.org/10.1126/science.1177894" target="_blank" rel="noopener">Tero et al., <i>Science</i> 2010</a>, who did it on a map of Tokyo.</p>
 		<div class="hud" aria-live="off">
 			<p class="readout"><span class="readout-label">Elapsed</span><span class="readout-value" id="hud-clock">0:00</span></p>
@@ -30,8 +30,9 @@
 		<div class="dish" id="dish">
 			<canvas id="gl" aria-hidden="true"></canvas>
 			<canvas id="overlay" role="img" aria-label="A round dish with a map of Berlin, oat flakes on stations, and a slime mold growing between them."></canvas>
+			<div class="lens-edge" aria-hidden="true"></div>
 			<div class="north" aria-hidden="true"><span>N</span></div>
-			<div class="scale" id="scale" aria-hidden="true"><span class="scale-text">5 km</span><span class="scale-bar"></span></div>
+			<div class="scale" id="scale" aria-hidden="true"><span class="scale-text">5&nbsp;km</span><span class="scale-bar"></span></div>
 			<div class="tip" id="tip" hidden></div>
 			<p class="dish-error" id="error" hidden></p>
 		</div>
@@ -41,12 +42,6 @@
 		<p class="hint" id="hint" aria-live="polite">Click the dish to put down an oat flake. Click a flake to take it away.</p>
 		<p class="hint touch-hint">Pinch the dish to look closer, and to move around it.</p>
 		<div class="dock" role="group" aria-label="Controls">
-			<div class="seg seg-setup" role="radiogroup" aria-label="Where the oat flakes go">
-				<label><input type="radio" name="setup" id="setup-hubs" value="hubs" checked><span>Busiest stations</span></label>
-				<label><input type="radio" name="setup" id="setup-ring" value="ring"><span>Ringbahn</span></label>
-				<label><input type="radio" name="setup" id="setup-none" value="none"><span>Only CODE</span></label>
-			</div>
-			<span class="rule" aria-hidden="true"></span>
 			<div class="seg seg-tools" role="radiogroup" aria-label="Tool">
 				<label><input type="radio" name="tool" id="tool-food" value="food" checked><span><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.25"/><circle class="fill" cx="8" cy="8" r="1.6"/></svg>Oat flake</span></label>
 				<label><input type="radio" name="tool" id="tool-light" value="light"><span><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.9"/><path d="M8 1.4v1.7M8 12.9v1.7M1.4 8h1.7M12.9 8h1.7M3.33 3.33l1.2 1.2M11.47 11.47l1.2 1.2M3.33 12.67l1.2-1.2M11.47 4.53l1.2-1.2"/></svg>Light</span></label>
@@ -67,7 +62,7 @@
 				<summary class="icon-button" data-tip="Lab settings"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h7.2M12.4 4.5H14M2 11.5h1.6M6.8 11.5H14"/><circle cx="10.8" cy="4.5" r="1.6"/><circle cx="5.2" cy="11.5" r="1.6"/></svg><span class="sr-only">Lab settings</span></summary>
 				<div class="pop-panel lab-panel">
 					<div class="pop-core">
-						<p class="pop-title">Lab settings</p>
+						<h2 class="pop-title">Lab settings</h2>
 						<p class="pop-note">The knobs of the model. They change what the slime builds from now on.</p>
 						<div class="sliders" id="sliders"></div>
 						<button type="button" id="reset-lab" class="text-button">Reset settings</button>
@@ -76,6 +71,15 @@
 			</details>
 		</div>
 	</div>
+
+	<section class="setup rise" aria-labelledby="setup-title">
+		<h2 class="label" id="setup-title">Oat flakes on</h2>
+		<div class="seg seg-setup" role="radiogroup" aria-labelledby="setup-title">
+			<label><input type="radio" name="setup" id="setup-hubs" value="hubs" checked><span>Busiest stations<small data-count="hubs">37</small></span></label>
+			<label><input type="radio" name="setup" id="setup-ring" value="ring"><span>Ringbahn<small data-count="ring">27</small></span></label>
+			<label><input type="radio" name="setup" id="setup-none" value="none"><span>Only CODE<small>you add them</small></span></label>
+		</div>
+	</section>
 
 	<aside class="side" aria-label="Results">
 		<section class="card card-verdict rise" aria-labelledby="verdict-title">
@@ -115,17 +119,17 @@
 			<summary class="pill-button"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><circle class="fill" cx="8" cy="4.9" r=".9"/></svg>About and sources</summary>
 			<div class="pop-panel about-panel">
 				<div class="pop-core">
-					<p class="pop-title">How the dish works</p>
+					<h2 class="pop-title">How the dish works</h2>
 					<p><i lang="la">Physarum polycephalum</i> is a slime mold. Tubes carry its protoplasm between the oat flakes. A tube that carries a lot grows thicker, and one that carries little withers.</p>
-					<p>Outside the city the dish is lit, the way the researchers lit the sea and the mountains around Tokyo. Places more than 500 m from any bus, tram or train stop get a dimmer light. The slime can cross them but would rather not.</p>
-					<p class="pop-title">Sources</p>
+					<p>Outside the city the dish is lit, the way the researchers lit the sea and the mountains around Tokyo. Places more than 500&nbsp;m from any bus, tram or train stop get a dimmer light. The slime can cross them but would rather not.</p>
+					<h2 class="pop-title">Sources</h2>
 					<p><a href="https://doi.org/10.1126/science.1177894" target="_blank" rel="noopener">Tero et al., “Rules for Biologically Inspired Adaptive Network Design”, <i>Science</i> 327 (2010)</a>.</p>
-					<p>Stops, stations and lines: VBB Verkehrsverbund Berlin-Brandenburg GmbH, CC BY 4.0, via Jannis R’s <a href="https://github.com/derhuerst/vbb-stations" target="_blank" rel="noopener">vbb-stations</a> and <a href="https://github.com/derhuerst/vbb-lines" target="_blank" rel="noopener">vbb-lines</a>.</p>
+					<p>Stops, stations and lines: VBB Verkehrsverbund Berlin-Brandenburg GmbH, CC&nbsp;BY&nbsp;4.0, via Jannis R’s <a href="https://github.com/derhuerst/vbb-stations" target="_blank" rel="noopener">vbb-stations</a> and <a href="https://github.com/derhuerst/vbb-lines" target="_blank" rel="noopener">vbb-lines</a>.</p>
 					<p class="keys" id="keys"><span><kbd>Space</kbd> pause</span> <span><kbd>R</kbd> start over</span> <span><kbd>N</kbd> real S+U</span> <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> tools</span> <span><kbd>+</kbd><kbd>−</kbd> zoom</span> <span><kbd>0</kbd> whole dish</span></p>
 				</div>
 			</div>
 		</details>
-		<p class="credit">Data: VBB, CC BY 4.0</p>
+		<p class="credit">Data: VBB, CC&nbsp;BY&nbsp;4.0</p>
 	</div>
 </div>
 <!-- /page -->
