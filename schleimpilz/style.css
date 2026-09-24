@@ -54,6 +54,7 @@
 	--col: clamp(340px, 30vw, 404px); /* the notebook */
 	--pad: 28px;
 	--target: 36px; /* height of a control */
+	--slider: 28px;
 	--radius: 4px;
 }
 
@@ -131,6 +132,7 @@
 @media (pointer: coarse), (max-width: 600px) {
 	:root {
 		--target: 44px;
+		--slider: 44px;
 	}
 }
 
@@ -209,7 +211,7 @@ h1 {
 .species i {
 	font-family: var(--font-display);
 	font-style: italic;
-	font-weight: 500;
+	font-weight: 450;
 	font-size: 18px;
 	font-variation-settings: "SOFT" 100, "WONK" 1;
 	color: var(--ink);
@@ -355,7 +357,7 @@ a:focus-visible {
 	align-items: center;
 	justify-content: center;
 	gap: 7px;
-	min-height: calc(var(--target) - 2px);
+	min-height: var(--target);
 	padding: 4px 10px;
 	text-align: center;
 	font-size: 14.5px;
@@ -441,7 +443,7 @@ input[type="range"] {
 	appearance: none;
 	display: block;
 	width: 100%;
-	height: 28px;
+	height: var(--slider);
 	margin: 0;
 	background: transparent;
 	cursor: pointer;
@@ -755,6 +757,7 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 
 .bar-rail .fill {
 	background: var(--rail-s);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--rail-s), var(--ink) 30%);
 }
 
 /* a value off the end of the scale gets an arrow */

@@ -256,19 +256,8 @@
 	const clockText = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 
 	function note(text, you = false, far = null) {
-		const li = document.createElement('li')
-		li.className = 'fresh'
-		const time = document.createElement('time')
-		time.textContent = clockText(state.clock)
-		const what = document.createElement('span')
-		what.textContent = text
-		if (you) what.className = 'you'
-		const dist = document.createElement('span')
-		dist.className = 'far'
-		dist.textContent = far == null ? '' : `${far.toFixed(1)} km`
-		li.append(time, what, dist)
 		const list = $('journal')
-		list.prepend(li)
+		list.prepend(DishUI.logItem({time: clockText(state.clock), text, you, far}))
 		while (list.children.length > 60) list.lastChild.remove()
 	}
 
@@ -299,41 +288,7 @@
 
 	// --- Slime against rail ----------------------------------------------------
 
-	const METRIC_ROWS = [
-		{key: 'cost', name: 'Track length', note: 'times the shortest network that links every flake', max: 3.5, fmt: (v) => `${v.toFixed(2)}×`},
-		{key: 'detour', name: 'Detour', note: 'extra distance between two flakes, against a straight line', max: 1, fmt: (v) => `+${Math.round(v * 100)}%`},
-		{key: 'tolerance', name: 'Survives a cut', note: 'chance a single broken link cuts no flake off', max: 1, fmt: (v) => `${Math.round(v * 100)}%`},
-	]
-
-	function showVerdict(result) {
-		const box = $('verdict')
-		if (!result) {
-			const p = document.createElement('p')
-			p.className = 'verdict-wait'
-			p.textContent = 'The slime needs to reach a few more oat flakes before it can be measured.'
-			box.replaceChildren(p)
-			return
-		}
-		const rows = METRIC_ROWS.filter((r) => result.slime[r.key] != null && result.rail[r.key] != null)
-		const overlap = result.overlap
-			? Object.assign(document.createElement('p'), {
-					className: 'verdict-overlap',
-					textContent: `The slime built ${Math.round(result.overlap.railBuilt * 100)}% of the real track, and ${Math.round(result.overlap.slimeOnRail * 100)}% of its tubes run along it.`,
-				})
-			: ''
-		box.replaceChildren(
-			...(overlap ? [overlap] : []),
-			...rows.map((r) => {
-				const el = document.createElement('div')
-				el.className = 'metric'
-				const bar = (who, label, v) =>
-					`<div class="bar bar-${who}"><span>${label}</span><span class="track"><span class="fill" style="--v:${Math.min(1, v / r.max).toFixed(3)}"></span></span><output>${r.fmt(v)}</output></div>`
-				el.innerHTML = `<div class="metric-head"><span class="metric-name">${r.name}</span><span class="metric-note">${r.note}</span></div>${bar('slime', 'Slime', result.slime[r.key])}${bar('rail', 'S+U', result.rail[r.key])}`
-				return el
-			}),
-			Object.assign(document.createElement('p'), {className: 'verdict-foot', textContent: result.foot || ''}),
-		)
-	}
+	const showVerdict = (result) => DishUI.verdict($('verdict'), result)
 
 	function updateVerdict() {
 		if (typeof NetworkMetrics === 'undefined' || !NetworkMetrics.compare) return
@@ -343,14 +298,17 @@
 		}
 		let result
 		try {
-			result = NetworkMetrics.compare({net, flakes: state.flakes, stations, edges: BERLIN.edges, pxPerKm: PX_PER_KM})
+			// with only a few flakes, or a ring of them, compare against the rail's
+			// shortest routes, not the whole web of track in the middle
+			const options = state.setup === 'hubs' ? {} : {railMode: 'shortest'}
+			result = NetworkMetrics.compare({net, flakes: state.flakes, stations, edges: BERLIN.edges, pxPerKm: PX_PER_KM, options})
 		} catch (err) {
 			console.warn(err)
 			return
 		}
 		state.railCoverage = result.railCoverage || null
 		if (state.showRail) state.overlayDirty = true
-		showVerdict(result)
+		showVerdict(result.forming ? null : result)
 	}
 
 	// --- Colours --------------------------------------------------------------
@@ -365,7 +323,8 @@
 			return [(n >> 16) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
 		}
 		const theme = document.documentElement.dataset.theme
-		const dark = theme ? theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches
+		const scheme = css('--scheme')
+		const dark = scheme ? scheme === 'dark' : theme ? theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches
 		renderer.setPalette({
 			dark,
 			bench: rgb('--bench'),
@@ -378,18 +337,7 @@
 			slime: rgb('--slime'),
 			core: rgb('--core'),
 		})
-		state.colors = {
-			ink: css('--ink'),
-			muted: css('--muted'),
-			paper: css('--paper'),
-			halo: css('--halo'),
-			railS: css('--rail-s'),
-			railU: css('--rail-u'),
-			oat: css('--oat'),
-			oatEdge: css('--oat-edge'),
-			oatFed: css('--oat-fed'),
-			mono: css('--font-mono'),
-		}
+		state.colors = DishUI.readColors(cs)
 		state.overlayDirty = true
 	}
 	readPalette()
@@ -465,184 +413,31 @@
 	}
 	fit.addEventListener('click', resetView)
 
-	// --- The overlay: oat flakes, names, the real network -----------------------
-
-	// an oat flake: a rolled, slightly irregular oval
-	function oatFlake(x, y, r, seed, fed) {
-		const c = state.colors
-		let s = (seed * 7919) % 233280
-		const rnd = () => (s = (s * 9301 + 49297) % 233280) / 233280
-		octx.save()
-		octx.translate(x, y)
-		octx.rotate(rnd() * Math.PI)
-		octx.beginPath()
-		const n = 11
-		for (let i = 0; i <= n; i++) {
-			const a = (i / n) * TAU
-			const k = 1 + (rnd() - 0.5) * 0.18
-			const px = Math.cos(a) * r * 1.25 * k, py = Math.sin(a) * r * 0.85 * k
-			i === 0 ? octx.moveTo(px, py) : octx.lineTo(px, py)
-		}
-		octx.closePath()
-		const g = octx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r * 1.3)
-		g.addColorStop(0, fed ? c.oatFed : c.oat)
-		g.addColorStop(1, c.oatEdge)
-		octx.fillStyle = g
-		octx.fill()
-		octx.lineWidth = 0.8
-		octx.strokeStyle = c.oatEdge
-		octx.stroke()
-		octx.beginPath()
-		octx.moveTo(-r * 0.7, r * 0.1)
-		octx.quadraticCurveTo(0, -r * 0.2, r * 0.7, r * 0.05)
-		octx.globalAlpha = 0.45
-		octx.stroke()
-		octx.restore()
-	}
+	// --- The overlay: oat flakes, names, the real network (drawn by ui.js) ------
 
 	function drawOverlay() {
-		const c = state.colors
-		const dpr = overlay.width / cssSize
 		const s = scale()
-		const z = Math.min(1.3, Math.max(0.7, cssSize / 820))
-		const fz = z * Math.min(1.8, Math.sqrt(view.zoom)) // flakes grow a little when you look closer
-		const [dcx, dcy] = toCss(SIM / 2, SIM / 2)
-		const dr = (SIM / 2) * s
-		const onScreen = (x, y, m = 24) => x > -m && y > -m && x < cssSize + m && y < cssSize + m
-		octx.setTransform(dpr, 0, 0, dpr, 0, 0)
-		octx.clearRect(0, 0, cssSize, cssSize)
-
-		if (state.showRail) {
-			octx.save()
-			octx.beginPath()
-			octx.arc(dcx, dcy, dr - 2, 0, TAU)
-			octx.clip()
-			octx.lineCap = 'round'
-			octx.lineJoin = 'round'
-			// track the slime built too is solid, the rest dashed
-			const cov = state.railCoverage
-			for (const pass of ['U', 'S']) {
-				for (const built of [false, true]) {
-					octx.beginPath()
-					BERLIN.edges.forEach(([a, b, mode], i) => {
-						if (mode !== pass) return
-						if (cov ? cov[i] >= 0.5 !== built : !built) return
-						octx.moveTo(...toCss(stations[a].x, stations[a].y))
-						octx.lineTo(...toCss(stations[b].x, stations[b].y))
-					})
-					octx.strokeStyle = pass === 'S' ? c.railS : c.railU
-					octx.lineWidth = (pass === 'S' ? 2.2 : 1.5) * z * (built ? 1 : 0.85)
-					octx.globalAlpha = built ? 0.92 : 0.7
-					octx.setLineDash(built ? [] : [4 * z, 3.5 * z])
-					octx.stroke()
-				}
-			}
-			octx.setLineDash([])
-			octx.globalAlpha = 1
-			octx.fillStyle = c.paper
-			octx.strokeStyle = c.ink
-			octx.lineWidth = 0.9
-			for (const st of stations) {
-				const [x, y] = toCss(st.x, st.y)
-				if (!onScreen(x, y)) continue
-				octx.beginPath()
-				octx.arc(x, y, 1.6 * fz, 0, TAU)
-				octx.fill()
-				octx.stroke()
-			}
-			octx.restore()
-		}
-
-		const flakeAt = state.flakes.map((f) => (f.alive ? toCss(f.x, f.y) : null))
-		state.flakes.forEach((f, i) => {
-			const at = flakeAt[i]
-			if (!at || !onScreen(...at)) return
-			const big = f.kind === 'code' ? 1.3 : 1
-			oatFlake(at[0], at[1], 4.4 * fz * big, i + 1, state.reached.has(i) && f.kind !== 'code')
-			if (f.kind === 'code') {
-				octx.beginPath()
-				octx.arc(at[0], at[1], 10 * fz, 0, TAU)
-				octx.strokeStyle = c.ink
-				octx.lineWidth = 1.4
-				octx.stroke()
-			}
+		const [cx, cy] = toCss(SIM / 2, SIM / 2)
+		DishUI.drawOverlay(octx, {
+			size: cssSize,
+			dpr: overlay.width / cssSize,
+			toCss,
+			scale: s,
+			zoom: view.zoom,
+			dish: {cx, cy, r: (SIM / 2) * s},
+			pxPerKm: PX_PER_KM,
+			flakes: state.flakes,
+			reached: state.reached,
+			stations,
+			edges: BERLIN.edges,
+			railCoverage: state.railCoverage,
+			showRail: state.showRail,
+			showNames: state.showNames,
+			pointer: state.pointer,
+			tool: state.tool,
+			brush: BRUSH,
+			colors: state.colors,
 		})
-
-		// names, placed so they sit neither on each other nor on a flake
-		const placed = flakeAt.filter(Boolean).map(([x, y]) => [x - 7 * fz, y - 6 * fz, 14 * fz, 12 * fz])
-		const fontSize = Math.round(11 * Math.min(1.15, z))
-		const label = (text, x, y, strong) => {
-			octx.font = `${strong ? 700 : 600} ${fontSize}px ${c.mono}`
-			const w = octx.measureText(text).width
-			const h = fontSize + 2
-			const gap = 9 * fz
-			for (const [lx, ly] of [
-				[x + gap, y - h / 2],
-				[x - gap - w, y - h / 2],
-				[x - w / 2, y - gap - h],
-				[x - w / 2, y + gap],
-			]) {
-				if (lx < 4 || ly < 4 || lx + w > cssSize - 4 || ly + h > cssSize - 4) continue
-				if (Math.hypot(lx + w / 2 - dcx, ly + h / 2 - dcy) > dr - 14) continue
-				if (placed.some((r) => lx < r[0] + r[2] && lx + w > r[0] && ly < r[1] + r[3] && ly + h > r[1])) continue
-				placed.push([lx - 2, ly - 1, w + 4, h + 2])
-				octx.textBaseline = 'middle'
-				octx.lineWidth = 3
-				octx.lineJoin = 'round'
-				octx.strokeStyle = c.halo
-				octx.strokeText(text, lx, ly + h / 2)
-				octx.fillStyle = strong ? c.ink : c.muted
-				octx.fillText(text, lx, ly + h / 2)
-				return
-			}
-		}
-		const start = state.flakes[0]
-		if (start && start.kind === 'code' && flakeAt[0]) label('CODE', flakeAt[0][0] + 5 * fz, flakeAt[0][1], true)
-		if (state.showNames) {
-			// the flakes come busiest first, so a small dish names the big ones
-			let room = cssSize * view.zoom > 480 ? Infinity : 10
-			state.flakes.forEach((f, i) => {
-				if (f.kind === 'station' && flakeAt[i] && onScreen(...flakeAt[i], 0) && room-- > 0) label(f.name, flakeAt[i][0], flakeAt[i][1], false)
-			})
-		}
-
-		// north, top right, and a scale, bottom right: on the bench, off the dish
-		octx.fillStyle = c.muted
-		octx.strokeStyle = c.muted
-		octx.textBaseline = 'alphabetic'
-		octx.font = `600 ${fontSize}px ${c.mono}`
-		const nx = cssSize - 26 * z, ny = 30 * z
-		octx.beginPath()
-		octx.moveTo(nx, ny - 14 * z)
-		octx.lineTo(nx + 5 * z, ny)
-		octx.lineTo(nx, ny - 3 * z)
-		octx.lineTo(nx - 5 * z, ny)
-		octx.closePath()
-		octx.fill()
-		octx.textAlign = 'center'
-		octx.fillText('N', nx, ny + 14 * z)
-		const km = [10, 5, 2, 1, 0.5].find((d) => d * PX_PER_KM * s <= 150 * z) || 0.5
-		const barW = km * PX_PER_KM * s
-		const bx = cssSize - 18 * z - barW, by = cssSize - 20 * z
-		octx.lineWidth = 1.5
-		octx.beginPath()
-		octx.moveTo(bx, by - 4)
-		octx.lineTo(bx, by)
-		octx.lineTo(bx + barW, by)
-		octx.lineTo(bx + barW, by - 4)
-		octx.stroke()
-		octx.fillText(km < 1 ? `${km * 1000} m` : `${km} km`, bx + barW / 2, by - 8 * z)
-		octx.textAlign = 'start'
-
-		if (state.pointer && state.tool !== 'food') {
-			octx.beginPath()
-			octx.arc(state.pointer.x, state.pointer.y, BRUSH * s, 0, TAU)
-			octx.strokeStyle = c.ink
-			octx.setLineDash([3, 3])
-			octx.lineWidth = 1
-			octx.stroke()
-			octx.setLineDash([])
-		}
 		state.overlayDirty = false
 	}
 
@@ -847,10 +642,10 @@
 
 	// lab settings: the knobs of the model that change what it builds
 	const LAB = [
-		{key: 'mu', name: 'How hard tubes compete', hint: 'Higher makes a leaner network, lower a meshier one.', min: 1, max: 3, step: 0.05, fmt: (v) => `μ ${v.toFixed(2)}`},
-		{key: 'flow', name: 'How much protoplasm flows', hint: 'More flow keeps more side tubes alive.', min: 0.3, max: 6, step: 0.1, fmt: (v) => v.toFixed(1)},
-		{key: 'decay', name: 'How fast idle tubes wither', min: 0.2, max: 3, step: 0.05, fmt: (v) => `${v.toFixed(2)}×`},
-		{key: 'growth', name: 'How fast the slime spreads', min: 0.3, max: 5, step: 0.1, fmt: (v) => `${v.toFixed(1)}×`},
+		{key: 'mu', name: 'How hard tubes compete', hint: 'Higher makes a leaner network, lower keeps more loops.', min: 1, max: 3, step: 0.05, fmt: (v) => `μ ${v.toFixed(2)}`},
+		{key: 'flow', name: 'How much protoplasm flows', hint: 'More flow keeps more side tubes alive.', min: 2, max: 30, step: 0.5, fmt: (v) => v.toFixed(1)},
+		{key: 'decay', name: 'How fast idle tubes wither', min: 0.3, max: 3, step: 0.05, fmt: (v) => `${v.toFixed(2)}×`},
+		{key: 'growth', name: 'How fast the slime spreads', min: 2, max: 30, step: 0.5, fmt: (v) => v.toFixed(1)},
 	].filter((s) => typeof net.params[s.key] === 'number')
 	const DEFAULT_PARAMS = {...net.params}
 	const sliders = $('sliders')
@@ -919,7 +714,8 @@
 
 	// the date on the dish, the way it would be written on a real one
 	const today = new Date()
-	$('dish-date').textContent = `Berlin, ${today.getDate()}.${today.getMonth() + 1}.${String(today.getFullYear()).slice(2)}`
+	const dated = $('dish-date')
+	if (dated) dated.textContent = `Berlin, ${today.getDate()}.${today.getMonth() + 1}.${String(today.getFullYear()).slice(2)}`
 
 	// --- Run -------------------------------------------------------------------
 

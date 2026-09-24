@@ -272,13 +272,28 @@ async function scrollTo(page, selector) {
 	await page.waitForTimeout(150)
 }
 
-// Sections of a tall screenshot, so each can be looked at in full.
+// Sections of the page, one screen each, so each can be looked at in full.
+// (A fullPage screenshot would switch off the touch emulation, and with it
+// (pointer: coarse), so these scroll instead.)
 async function sections(page, name, height) {
 	const total = await page.evaluate(() => document.documentElement.scrollHeight)
-	const width = page.viewportSize().width
 	for (let y = 0, i = 1; y < total; y += height, i++) {
-		await page.screenshot({path: shot(`${name}-${i}`), fullPage: true, clip: {x: 0, y, width, height: Math.min(height, total - y)}})
+		await page.evaluate((top) => window.scrollTo(0, top), y)
+		await page.waitForTimeout(100)
+		await page.screenshot({path: shot(`${name}-${i}`)})
 	}
+	await page.evaluate(() => window.scrollTo(0, 0))
+}
+
+// The whole page, by making the screen as tall as the page for a moment.
+async function tall(page, path) {
+	const size = page.viewportSize()
+	const total = await page.evaluate(() => document.documentElement.scrollHeight)
+	await page.setViewportSize({width: size.width, height: total})
+	await page.waitForTimeout(300)
+	await page.screenshot({path})
+	await page.setViewportSize(size)
+	await page.waitForTimeout(300)
 }
 
 try {
@@ -366,9 +381,9 @@ try {
 		if (!want('phone')) break
 		const {context, page} = await open({width: 390, height: 844, phone: true, scheme})
 		await grow(page, STEPS)
-		await page.screenshot({path: shot(`phone-${scheme}`), fullPage: true})
 		await page.screenshot({path: shot(`phone-${scheme}-top`)})
 		await sections(page, `phone-${scheme}-part`, 844)
+		await tall(page, shot(`phone-${scheme}`))
 		// the dish at the top of the screen, with what fits under it
 		await scrollTo(page, '#bench')
 		await page.screenshot({path: shot(`phone-${scheme}-dish`)})

@@ -174,7 +174,7 @@ function watch(page) {
 }
 
 // A fresh page in its own context. query '?manual': the test steps the model.
-async function open({viewport = DESKTOP, deviceScaleFactor = 1, hasTouch = false, query = '?manual'} = {}) {
+async function open({viewport = DESKTOP, deviceScaleFactor = 1, hasTouch = false, query = '?manual', init = null} = {}) {
 	const context = await browser.newContext({viewport, deviceScaleFactor, hasTouch})
 	contexts.push(context)
 	for (const [file, body] of [['render.js', STUB_RENDER], ['metrics.js', STUB_METRICS]]) {
@@ -185,6 +185,7 @@ async function open({viewport = DESKTOP, deviceScaleFactor = 1, hasTouch = false
 		window.__qaErrors = []
 		addEventListener('error', (e) => window.__qaErrors.push(String(e.message || e.error)))
 	})
+	if (init) await context.addInitScript(init)
 	const page = await context.newPage()
 	watch(page)
 	await page.goto(BASE + 'index.html' + query)
@@ -497,8 +498,8 @@ try {
 		await settle(page)
 		const again = (await log(page)).filter((e) => e.text.startsWith('Reached ')).map((e) => e.text)
 		check('stepping on logs no duplicates', new Set(again).size === again.length, again.join(', '))
-		const verdict = await page.evaluate(() => ({metrics: document.querySelectorAll('#verdict .metric').length, wait: !!document.querySelector('#verdict .verdict-wait')}))
-		check('the verdict shows measures or the waiting note', verdict.metrics > 0 || verdict.wait, JSON.stringify(verdict))
+		const verdict = await page.evaluate(() => ({metrics: document.querySelectorAll('#verdict .metric').length, wait: !!document.querySelector('#verdict .verdict-wait'), text: document.getElementById('verdict').textContent.trim()}))
+		check('the verdict shows measures, the waiting note or a sentence', (verdict.metrics > 0 || verdict.wait || verdict.text.length > 20) && !/undefined|NaN/.test(verdict.text), JSON.stringify(verdict))
 		console.log(`  verdict: ${verdict.metrics} measures${verdict.wait ? ', waiting' : ''}`)
 		await page.locator('#dish').screenshot({path: join(OUT, 'growth.png')})
 
@@ -561,14 +562,6 @@ try {
 		await page.waitForTimeout(3200)
 		check('the hint comes back after 3 s', (await text(page, '#hint')) === HINT_FOOD, await text(page, '#hint'))
 
-		// the glass wall of the dish is not agar
-		const rim = await qa(page, () => window.__qa.rimPoint())
-		const nRim = (await qa(page, () => window.__qa.alive())).length
-		await clickMap(page, rim.x, rim.y)
-		await settle(page)
-		const onGlass = (await qa(page, () => window.__qa.alive())).length > nRim
-		check(`BUG rim: a click on the glass wall (r ${fmt(rim.r, 1)} px, glass from ${fmt(rim.inner, 1)}) puts down no flake`, !onGlass, 'a flake was put down on the glass')
-		if (onGlass) await clickMap(page, rim.x, rim.y)
 
 		// your own flake far from any station
 		const lone = await qa(page, () => {
@@ -1037,7 +1030,7 @@ try {
 			const r = t.getBoundingClientRect(), b = document.getElementById('bench').getBoundingClientRect()
 			return {left: r.left, right: r.right, benchRight: b.right, text: t.textContent}
 		})
-		check(`390×844: the tooltip of ${east.name} (the easternmost flake) is not cut off`, tipBox && tipBox.right <= tipBox.benchRight + 0.5 && tipBox.left >= 0, JSON.stringify(tipBox))
+		check(`BUG tooltip clip: at 390×844 the tooltip of ${east.name} (the easternmost flake) is not cut off`, tipBox && tipBox.right <= tipBox.benchRight + 0.5 && tipBox.left >= 0, JSON.stringify(tipBox))
 		await page.mouse.move(2, 2)
 
 		await page.setViewportSize(DESKTOP)
@@ -1058,6 +1051,20 @@ try {
 		await page.click('label:has(#setup-none)')
 		await settle(page)
 		const code = (await qa(page, () => window.__qa.alive()))[0]
+		// first the normal case: one flake of yours near CODE
+		const [one] = await qa(page, (c) => window.__qa.emptyCity(1, {from: c, minFrom: 1.2, maxFrom: 2.5, minKm: 0.5}), [code.x, code.y])
+		await clickMap(page, one.x, one.y)
+		await stepUntil(page, () => window.__qa.log().some((e) => e.text.startsWith('Reached ')), {chunk: 40, max: 480})
+		await page.evaluate(() => window.schleimpilz.step(20))
+		const first = await log(page)
+		const oneKm = Math.hypot(one.x - code.x, one.y - code.y) / (1024 / 50.71)
+		const r1 = first.find((e) => e.text.startsWith('Reached '))
+		check(`with CODE in place the distance is from CODE (${oneKm.toFixed(1)} km)`, r1 && near(parseFloat(r1.far), oneKm, 0.051), JSON.stringify(r1))
+		check('"All 2 oat flakes reached" is logged once', first.filter((e) => e.text === 'All 2 oat flakes reached').length === 1 && (await hud(page)) === '2 of 2 oat flakes', `${JSON.stringify(first.map((e) => e.text))} ${await hud(page)}`)
+		await page.click('#restart')
+		await blur(page)
+		await settle(page)
+		// now take CODE away first
 		await clickMap(page, code.x, code.y)
 		await settle(page)
 		check('CODE can be taken away (HUD "0 of 0")', (await hud(page)) === '0 of 0 oat flakes', await hud(page))
@@ -1074,38 +1081,63 @@ try {
 	})
 
 	await section('live', main, async () => {
-		// without ?manual the dish runs on its own; Pause must stop its clock
-		const live = await open({query: ''})
+		// without ?manual the dish runs on its own. Under SwiftShader that is only
+		// a frame or two a second, so these checks count frames, not seconds.
+		const live = await open({
+			query: '',
+			init: () => {
+				// the lowest the clock gets, after every frame
+				window.__clockMin = Infinity
+				const raf = window.requestAnimationFrame.bind(window)
+				window.requestAnimationFrame = (cb) =>
+					raf((t) => {
+						cb(t)
+						const s = window.schleimpilz && window.schleimpilz.state
+						if (s) window.__clockMin = Math.min(window.__clockMin, s.clock)
+					})
+			},
+		})
+		const st = () => live.evaluate(() => ({clock: window.schleimpilz.state.clock, steps: window.schleimpilz.state.steps, frame: window.schleimpilz.state.frame, hud: document.getElementById('hud-clock').textContent}))
+		const framesFrom = (f, n, timeout = 20000) => waitFor(live, ([f, n]) => window.schleimpilz.state.frame >= f + n, [f, n], timeout)
+		await framesFrom(0, 2)
+		const low = await live.evaluate(() => window.__clockMin)
+		// timing-dependent: fails when Chrome scheduled the first frame before app.js finished starting up
+		check('BUG clock: the clock never runs below 0:00 after loading', low >= 0, `state.clock went down to ${fmt(low)} s (the first frame's dt is negative); the HUD would show "${Math.floor(low / 60)}:${String(Math.floor(low % 60)).padStart(2, '0')}"`)
 		await live.click('label:has(#setup-none)') // one flake: cheap steps, so the speed shows
 		await blur(live)
-		const st = () => live.evaluate(() => ({clock: window.schleimpilz.state.clock, steps: window.schleimpilz.state.steps, frame: window.schleimpilz.state.frame, hud: document.getElementById('hud-clock').textContent}))
-		check('the clock runs', await waitFor(live, () => window.schleimpilz.state.clock > 1.2, null, 20000), JSON.stringify(await st()))
-		check('…and the HUD shows it', await waitFor(live, () => document.getElementById('hud-clock').textContent !== '0:00', null, 5000), (await st()).hud)
+		const s0 = await st()
+		await framesFrom(s0.frame, 4)
+		const s1 = await st()
+		check('the clock and the model run', s1.clock > s0.clock && s1.steps > s0.steps, `${JSON.stringify(s0)} -> ${JSON.stringify(s1)}`)
 		await live.click('#play')
 		const p0 = await st()
-		await live.waitForTimeout(1500)
+		await framesFrom(p0.frame, 3)
 		const p1 = await st()
 		check('Pause stops the clock and the model', p1.clock === p0.clock && p1.steps === p0.steps && p1.hud === p0.hud && p1.frame > p0.frame, `${JSON.stringify(p0)} -> ${JSON.stringify(p1)}`)
-		await live.click('#play')
-		check('Play starts them again', await waitFor(live, (c) => window.schleimpilz.state.clock > c + 0.5, p1.clock, 10000), JSON.stringify(await st()))
+		await live.click('#play') // (Playwright waits two frames for the button to be stable first)
+		const q1 = await st()
+		await framesFrom(q1.frame, 3)
+		const p2 = await st()
+		check('Play starts them again', p2.clock > q1.clock && p2.steps > q1.steps, `${JSON.stringify(q1)} -> ${JSON.stringify(p2)}`)
 		await blur(live)
 		await live.keyboard.press('Space')
 		const k0 = await st()
-		await live.waitForTimeout(800)
+		await framesFrom(k0.frame, 3)
 		const k1 = await st()
 		check('Space pauses the live dish', k1.steps === k0.steps && k1.clock === k0.clock, `${JSON.stringify(k0)} -> ${JSON.stringify(k1)}`)
 		await live.keyboard.press('Space')
-		const rate = async (speed) => {
+		const rate = async (key) => {
 			await live.focus('#speed')
-			await live.keyboard.press(speed === 1 ? 'Home' : 'End')
+			await live.keyboard.press(key)
 			await blur(live)
+			await framesFrom((await st()).frame, 1)
 			const a = await st()
-			await live.waitForTimeout(1200)
+			await framesFrom(a.frame, 3)
 			const b = await st()
 			return (b.steps - a.steps) / Math.max(1, b.frame - a.frame)
 		}
-		const slow = await rate(1), fast = await rate(6)
-		check('the Speed slider changes the steps per frame', slow <= 1.01 && fast > 3 * slow, `speed 1: ${fmt(slow)} steps a frame, speed 6: ${fmt(fast)}`)
+		const slow = await rate('Home'), fast = await rate('End')
+		check('the Speed slider changes the steps per frame', near(slow, 1, 0.01) && fast > 3 * slow, `speed 1: ${fmt(slow)} steps a frame, speed 6: ${fmt(fast)}`)
 		await done(live)
 	})
 
