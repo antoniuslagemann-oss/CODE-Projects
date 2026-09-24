@@ -197,6 +197,8 @@
 		return km < 1.5 ? station.name : null
 	}
 
+	const lowerFirst = (text) => text.charAt(0).toLowerCase() + text.slice(1)
+
 	const kmFromStart = (f) => Math.hypot(f.x - state.flakes[0].x, f.y - state.flakes[0].y) / PX_PER_KM
 
 	function syncFlakes() {
@@ -232,7 +234,7 @@
 			const f = state.flakes[hit]
 			f.alive = false
 			state.reached.delete(hit)
-			note(`You took away the oat flake at ${f.name}`, true)
+			note(f.kind === 'yours' ? `You took away ${lowerFirst(f.name)}` : `You took away the oat flake at ${f.name}`, true)
 			syncFlakes()
 			return
 		}
@@ -242,8 +244,9 @@
 			return
 		}
 		const near = placeName(x, y)
-		const flake = {name: near ? `near ${near}` : 'Your oat flake', x, y, kind: 'yours', alive: true}
-		const slot = state.flakes.findIndex((f) => !f.alive)
+		const flake = {name: near ? `Your oat flake near ${near}` : 'Your oat flake', x, y, kind: 'yours', alive: true}
+		// slot 0 stays CODE's, even when it's gone: distances are measured from there
+		const slot = state.flakes.findIndex((f, i) => i > 0 && !f.alive)
 		if (slot >= 0) state.flakes[slot] = flake
 		else if (state.flakes.length < 64) state.flakes.push(flake)
 		else return flash('The dish is full. Take a flake away first.')
@@ -269,7 +272,7 @@
 			if (state.reached.has(i)) continue
 			state.reached.add(i)
 			const f = state.flakes[i]
-			if (f && f.kind !== 'code') note(`Reached ${f.name}`, false, kmFromStart(f))
+			if (f && f.kind !== 'code') note(`Reached ${f.kind === 'yours' ? lowerFirst(f.name) : f.name}`, false, kmFromStart(f))
 			state.overlayDirty = true
 		}
 		const alive = aliveCount(), reached = reachedCount()
@@ -367,7 +370,7 @@
 		renderer.update(net)
 		renderer.render(performance.now() / 1000, {still: reducedMotion, view})
 	}
-	new ResizeObserver(layout).observe(bench)
+	new ResizeObserver(() => requestAnimationFrame(layout)).observe(bench)
 
 	// --- The view: the whole dish, or a closer look -----------------------------
 
@@ -496,9 +499,8 @@
 		if (state.tool === 'food') {
 			drag = {cx: p.cx, cy: p.cy, at: p, moved: false}
 		} else {
-			state.painting = p
+			state.painting = {...p, pending: true}
 			state.paintNoted = false
-			paint(p, p)
 		}
 	})
 
@@ -528,7 +530,12 @@
 			return
 		}
 		if (state.painting) {
-			paint(state.painting, p)
+			const from = state.painting
+			if (from.pending) {
+				if (Math.hypot(p.cx - from.cx, p.cy - from.cy) < 5) return
+				paint(from, from) // the stroke starts where the pointer went down
+			}
+			paint(from, p)
 			state.painting = p
 		}
 		if (state.tool !== 'food') state.overlayDirty = true
@@ -541,7 +548,12 @@
 			if (pointers.size < 2) pinch = null
 			return
 		}
-		if (drag && e.type === 'pointerup' && !drag.moved) toggleFlakeAt(drag.at.x, drag.at.y)
+		if (drag && e.type === 'pointerup' && !drag.moved) {
+			toggleFlakeAt(drag.at.x, drag.at.y)
+			showTip(toSim(e))
+		}
+		// a tap with the light or dark tool paints one spot
+		if (state.painting && state.painting.pending && e.type === 'pointerup') paint(state.painting, state.painting)
 		drag = null
 		state.painting = null
 	}
@@ -581,10 +593,11 @@
 		}
 		const status = hit.kind === 'code' ? 'the slime started here' : state.reached.has(hitI) ? 'reached' : 'not reached yet'
 		tip.textContent = `${hit.name} · ${status}`
-		const [x, y] = toCss(hit.x, hit.y)
-		tip.style.left = x + 'px'
-		tip.style.top = y + 'px'
 		tip.hidden = false
+		const [x, y] = toCss(hit.x, hit.y)
+		const half = tip.offsetWidth / 2
+		tip.style.left = Math.min(cssSize - half - 4, Math.max(half + 4, x)) + 'px'
+		tip.style.top = y + 'px'
 	}
 
 	let flashTimer = 0
@@ -606,6 +619,7 @@
 
 	const setTool = (tool) => {
 		state.tool = tool
+		state.painting = null
 		$('tool-' + tool).checked = true
 		$('hint').textContent = HINTS[tool]
 		overlay.style.cursor = tool === 'food' ? 'crosshair' : 'none'
@@ -731,7 +745,7 @@
 
 	let last = performance.now()
 	function frame(now) {
-		const dt = Math.min(0.1, (now - last) / 1000)
+		const dt = Math.max(0, Math.min(0.1, (now - last) / 1000))
 		last = now
 		if (state.running && !MANUAL) {
 			advance(state.speed)
