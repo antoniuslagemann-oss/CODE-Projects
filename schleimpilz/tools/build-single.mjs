@@ -104,8 +104,8 @@ const isStrict = (code) => /^(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*(['"])use stri
 // Inside <script>, the HTML parser stops at the first "</script", and after a
 // "<!--" a later "<script" can keep it from stopping where it should. Both can
 // only be in strings, regexes and comments, where "<\/script" and "\x3C!--"
-// mean the same thing (only String.raw would notice). Anywhere else they are
-// a syntax error, which compiling the bundle catches.
+// mean the same thing (only String.raw or a regex's .source would notice).
+// Anywhere else they are a syntax error, which compiling the bundle catches.
 const escapeJs = (code) => code.replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '\\x3C!--')
 
 // Inside <style>, only "</style" matters, and in CSS "\/" is "/".
@@ -117,9 +117,10 @@ const LOADS = /\b(fetch|import|importScripts|Worker|SharedWorker|EventSource)\s*
 // url() and @import in CSS. The Artifact has no other files, and its CSP only
 // lets stylesheets and fonts come from Google Fonts.
 function checkCss(css, what) {
-	for (const m of css.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)|@import\s+(['"])(.*?)\3/gi)) {
+	for (const m of css.matchAll(/@import\s+(?:url\(\s*)?(['"]?)([^'"\s);]+)\1|url\(\s*(['"]?)(.*?)\3\s*\)/gi)) {
 		const url = m[2] ?? m[4]
 		if (/^(data:|#)/i.test(url) || /^https:\/\/fonts\.(googleapis|gstatic)\.com\//.test(url)) continue
+		if (m[2] !== undefined) fail(`${what} imports ${url}, which the Artifact can't load. Link it from index.html instead, and the build puts it in.`)
 		fail(`${what} loads ${url}, which the Artifact can't. Put it in as a data: URI.`)
 	}
 }
@@ -175,7 +176,9 @@ export function build({root = ROOT, out = join(root, 'dist')} = {}) {
 	if (stray(html.slice(body.index + body[0].length, start.index))) fail('index.html has content between <body> and <!-- page -->, which the single file would leave out. Move it inside the markers.')
 	const markup = html.slice(start.index + start[0].length, end.index).trim()
 	const after = html.slice(end.index + end[0].length).replace(/<\/body>[\s\S]*$/i, '')
-	const lang = attrs(/<html\b[^>]*>/i.exec(html)?.[0] ?? '<html>').lang
+	// the host brings its own <html> and <body>; only lang comes along, set by the script
+	const {lang, ...lost} = {...attrs(/<html\b[^>]*>/i.exec(html)?.[0] ?? '<html>'), ...attrs(body[0])}
+	if (Object.keys(lost).length) fail(`index.html has ${Object.keys(lost).join(', ')} on <html> or <body>, and the host brings its own. Put it on an element inside the markers instead.`)
 
 	// --- The head: title, fonts and stylesheets ---
 	let title, description
@@ -214,7 +217,7 @@ export function build({root = ROOT, out = join(root, 'dist')} = {}) {
 		const a = attrs(tag.slice(0, tag.indexOf('>') + 1))
 		if (a.type && !/^(text|application)\/javascript$/i.test(a.type)) fail(`index.html has <script type="${a.type}">, and only classic scripts can share one <script>.`)
 		if ('async' in a || 'defer' in a) fail(`A <script> in index.html is async or defer, which would run in another order once the scripts are one. Leave the attribute out; the scripts are at the end of the page anyway.`)
-		if (a.src && !isLocal(a.src)) fail(`index.html loads the script ${a.src}. This build doesn't handle scripts from other hosts yet (the Artifact's CSP allows cdnjs.cloudflare.com, cdn.jsdelivr.net/npm and unpkg.com).`)
+		if (a.src && !isLocal(a.src)) fail(`index.html loads the script ${a.src}. This build doesn't handle scripts from other hosts yet, though the Artifact's CSP allows a few CDNs, cdnjs.cloudflare.com among them.`)
 		scripts.push(a.src ? {name: a.src, text: read(root, a.src, '<script src>')} : {name: `index.html <script> ${scripts.length + 1}`, text: inline})
 	}
 	if (stray(after.replace(SCRIPT, ''))) fail(`index.html has something after <!-- /page --> besides scripts, which the single file would leave out: ${stray(after.replace(SCRIPT, '')).slice(0, 80)}`)

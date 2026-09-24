@@ -58,12 +58,13 @@ const problems = []
 try {
 	const page = await browser.newPage({viewport: {width: 1440, height: 900}, deviceScaleFactor: 1})
 	page.on('console', (m) => {
-		const text = m.text()
+		const text = m.text().trim()
 		const at = m.location()
 		if (FONTS.test(at.url)) return // Google Fonts out of reach
 		if (/GPU stall due to ReadPixels/.test(text)) return // the driver grumbling about a readback, as in tests/smoke.mjs
-		if (m.type() === 'error' || /GL_INVALID|WebGL:/.test(text))
-			problems.push(`console ${m.type()}: ${where(text)}${at.url === SCRIPT_NAME ? ` (at ${built.locate(at.lineNumber + 1)})` : ''}`)
+		// where it came from: a line of the one script, or the URL that didn't load
+		const from = at.url === SCRIPT_NAME ? built.locate(at.lineNumber + 1) : at.url && !at.url.endsWith('/preview.html') ? at.url : ''
+		if (m.type() === 'error' || /GL_INVALID|WebGL:/.test(text)) problems.push(`console ${m.type()}: ${where(text)}${from ? ` (at ${from})` : ''}`)
 	})
 	page.on('pageerror', (err) => problems.push(`page error: ${where(err.stack || err.message)}`))
 	page.on('requestfailed', (r) => {
@@ -79,7 +80,7 @@ try {
 	await page.screenshot({path: join(OUT, 'page.png'), fullPage: true})
 
 	const info = await page.evaluate(async () => {
-		await document.fonts.ready
+		await Promise.race([document.fonts.ready, new Promise((ok) => setTimeout(ok, 5000))])
 		const error = document.getElementById('error')
 		return {
 			title: document.title,
