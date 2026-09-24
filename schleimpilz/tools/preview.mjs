@@ -195,8 +195,34 @@ function measure() {
 			for (const {t, e} of near) if (isFinite(d[t]) && e > 0) (detour += d[t] / e), pairs++
 		}
 	}
+	// braids: tubes running right alongside another tube, one mesh cell away
+	const cell = net.spacing, grid = new Map()
+	const mid = (e) => [(net.x[a[e]] + net.x[b[e]]) / 2, (net.y[a[e]] + net.y[b[e]]) / 2]
+	for (let e = 0; e < net.edgeCount; e++) {
+		if (!tube[e]) continue
+		const [mx, my] = mid(e), key = Math.floor(my / cell) * 4096 + Math.floor(mx / cell)
+		if (!grid.has(key)) grid.set(key, [])
+		grid.get(key).push(e)
+	}
+	let braidKm = 0
+	for (let e = 0; e < net.edgeCount; e++) {
+		if (!tube[e]) continue
+		const [mx, my] = mid(e), cx = Math.floor(mx / cell), cy = Math.floor(my / cell)
+		const ux = (net.x[b[e]] - net.x[a[e]]) / length[e], uy = (net.y[b[e]] - net.y[a[e]]) / length[e]
+		let found = false
+		for (let yy = cy - 1; yy <= cy + 1 && !found; yy++)
+			for (let xx = cx - 1; xx <= cx + 1 && !found; xx++)
+				for (const f of grid.get(yy * 4096 + xx) || []) {
+					if (f === e || a[f] === a[e] || a[f] === b[e] || b[f] === a[e] || b[f] === b[e]) continue
+					const [fx, fy] = mid(f)
+					if ((fx - mx) ** 2 + (fy - my) ** 2 > (1.3 * cell) ** 2) continue
+					const vx = (net.x[b[f]] - net.x[a[f]]) / length[f], vy = (net.y[b[f]] - net.y[a[f]]) / length[f]
+					if (Math.abs(ux * vx + uy * vy) > 0.8) found = true
+				}
+		if (found) braidKm += length[e] / PX_PER_KM
+	}
 	return {
-		ref, tubeKm: km, faintKm: faint, edges, nodes, components: nc, loops: edges - nodes + nc, deadEnds,
+		ref, tubeKm: km, faintKm: faint, braided: km ? braidKm / km : 0, edges, nodes, components: nc, loops: edges - nodes + nc, deadEnds,
 		bridged: km ? bridgeKm / km : 0, connected, alive: living.length, detour: pairs ? detour / pairs : 0,
 		p50: ds.length ? ds[Math.floor(0.5 * (ds.length - 1))] : 0, p90: ds.length ? ds[Math.floor(0.9 * (ds.length - 1))] : 0,
 	}
@@ -275,7 +301,7 @@ function sheet(images) {
 
 const fmt = (m) =>
 	`flakes on the network ${m.connected}/${m.alive}, tubes ${m.tubeKm.toFixed(0)} km (+${m.faintKm.toFixed(0)} km faint), ` +
-	`loops ${m.loops}, ${(100 * m.bridged).toFixed(0)}% of it tree-like, dead ends ${m.deadEnds}, pieces ${m.components}, ` +
+	`loops ${m.loops}, ${(100 * m.bridged).toFixed(0)}% of it tree-like, ${(100 * m.braided).toFixed(0)}% braided, dead ends ${m.deadEnds}, pieces ${m.components}, ` +
 	`detour ${m.detour.toFixed(2)}, D median ${m.p50.toFixed(3)} p90 ${m.p90.toFixed(3)} top ${m.ref.toFixed(3)}`
 
 // --- the hand, for ADAPT ---
