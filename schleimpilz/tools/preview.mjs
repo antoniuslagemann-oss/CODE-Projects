@@ -91,6 +91,9 @@ function png(path, img, w = W, h = H) {
 // a 3x5 pixel font for the step number on the pictures
 const GLYPH = {0: [7, 5, 5, 5, 7], 1: [2, 6, 2, 2, 7], 2: [7, 1, 7, 4, 7], 3: [7, 1, 7, 1, 7], 4: [5, 5, 7, 1, 1], 5: [7, 4, 7, 1, 7], 6: [7, 4, 7, 5, 7], 7: [7, 1, 1, 1, 1], 8: [7, 5, 7, 5, 7], 9: [7, 5, 7, 1, 7]}
 
+// the far end of edge e from node i
+const other = (e, i) => (net.a[e] === i ? net.b[e] : net.a[e])
+
 // Strong tubes as a graph, and what it says about the network.
 function measure() {
 	const {D, a, b, alive, length} = net
@@ -123,7 +126,7 @@ function measure() {
 			for (let k = net.adjStart[i]; k < net.adjStart[i + 1]; k++) {
 				const e = net.adjEdge[k]
 				if (!tube[e]) continue
-				const j = net.adjNode[k]
+				const j = other(net.adjEdge[k], i)
 				if (comp[j] < 0) (comp[j] = nc), stack.push(j)
 			}
 		}
@@ -144,7 +147,7 @@ function measure() {
 				const k = top[2]++
 				const e = net.adjEdge[k]
 				if (!tube[e] || e === via) continue
-				const j = net.adjNode[k]
+				const j = other(net.adjEdge[k], i)
 				if (disc[j] < 0) {
 					disc[j] = low[j] = clock++
 					stack.push([j, e, net.adjStart[j]])
@@ -184,7 +187,7 @@ function measure() {
 				for (let k = net.adjStart[i]; k < net.adjStart[i + 1]; k++) {
 					const e = net.adjEdge[k]
 					if (!tube[e]) continue
-					const j = net.adjNode[k], nd = dd + length[e]
+					const j = other(net.adjEdge[k], i), nd = dd + length[e]
 					if (nd < d[j]) (d[j] = nd), heap.push([nd, j])
 				}
 			}
