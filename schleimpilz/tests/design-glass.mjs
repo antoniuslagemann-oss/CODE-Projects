@@ -112,7 +112,7 @@ async function measure(page, label) {
 			return r.width && r.height ? {sel, x: r.left, y: r.top, w: r.width, h: r.height} : null
 		}
 		const dish = box('#dish')
-		const parts = ['.masthead', '.hud', '.card-verdict', '.card-log', '.corner', '.key', '.dock', '#hint'].map(box).filter(Boolean)
+		const parts = ['.masthead', '.hud', '.setup', '.card-verdict', '.card-log', '.corner', '.key', '.dock', '#hint'].map(box).filter(Boolean)
 		return {
 			dish,
 			parts,
@@ -186,10 +186,16 @@ async function stage(width, height, extra = {}) {
 		await page.evaluate(() => window.schleimpilz.setTool('food'))
 		// keyboard focus in the dock
 		await page.mouse.move(0, 0)
-		await page.locator('#setup-hubs').focus()
+		await page.locator('#tool-food').focus()
 		await page.keyboard.press('Tab')
+		await page.locator('.dock').screenshot({path: shot(`stage-${name}-focus-play`)})
+		await page.locator('#show-rail').focus()
 		await page.keyboard.press('Shift+Tab')
-		await page.locator('.dock').screenshot({path: shot(`stage-${name}-focus`)})
+		await page.keyboard.press('Tab')
+		await page.locator('.dock').screenshot({path: shot(`stage-${name}-focus-switch`)})
+		await page.locator('#setup-ring').focus()
+		await page.keyboard.press('ArrowUp')
+		await page.locator('.setup').screenshot({path: shot(`stage-${name}-focus-setup`)})
 	}
 	await context.close()
 }
@@ -260,6 +266,18 @@ try {
 		await page.waitForTimeout(150)
 		await page.screenshot({path: shot('phone-lab')})
 		await page.keyboard.press('Escape')
+		// looking closer, with "Whole dish" under the lens
+		await page.evaluate(() => {
+			window.schleimpilz.zoomAt(179, 170, 2.4)
+			window.schleimpilz.step(1)
+		})
+		await page.evaluate(() => document.getElementById('bench').scrollIntoView({block: 'start'}))
+		await page.screenshot({path: shot('phone-zoomed')})
+		const fit = await page.evaluate(() => {
+			const f = document.getElementById('fit').getBoundingClientRect(), h = document.getElementById('hint').getBoundingClientRect()
+			return {overlapsHint: f.bottom > h.top && f.top < h.bottom && f.right > h.left && f.left < h.right, f: [f.left, f.top, f.width, f.height].map(Math.round), h: [h.left, h.top, h.width, h.height].map(Math.round)}
+		})
+		if (fit.overlapsHint) problems.push(`phone: "Whole dish" overlaps the hint ${JSON.stringify(fit)}`)
 		await context.close()
 		log(`phone: page is ${total} px tall`)
 	}
