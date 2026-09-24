@@ -220,7 +220,7 @@
 	}
 
 	function toggleFlakeAt(x, y) {
-		const radius = (12 / cssSize) * SIM
+		const radius = 12 / scale()
 		let hit = -1, hitD = radius
 		state.flakes.forEach((f, i) => {
 			if (!f.alive) return
@@ -416,9 +416,53 @@
 		glCanvas.height = overlay.height = Math.round(size * dpr)
 		state.overlayDirty = true
 		renderer.update(net)
-		renderer.render(performance.now() / 1000, {still: reducedMotion})
+		renderer.render(performance.now() / 1000, {still: reducedMotion, view})
 	}
 	new ResizeObserver(layout).observe(bench)
+
+	// --- The view: the whole dish, or a closer look -----------------------------
+
+	const MAX_ZOOM = 4
+	const view = {x: SIM / 2, y: SIM / 2, zoom: 1}
+	const scale = () => (cssSize / SIM) * view.zoom
+	const toCss = (x, y) => [(x - view.x) * scale() + cssSize / 2, (y - view.y) * scale() + cssSize / 2]
+	const fromCss = (cx, cy) => [(cx - cssSize / 2) / scale() + view.x, (cy - cssSize / 2) / scale() + view.y]
+
+	const fit = document.createElement('button')
+	fit.type = 'button'
+	fit.id = 'fit'
+	fit.className = 'fit'
+	fit.textContent = 'Whole dish'
+	fit.hidden = true
+	dish.append(fit)
+
+	function clampView() {
+		view.zoom = Math.min(MAX_ZOOM, Math.max(1, view.zoom))
+		const half = SIM / (2 * view.zoom)
+		view.x = Math.min(SIM - half, Math.max(half, view.x))
+		view.y = Math.min(SIM - half, Math.max(half, view.y))
+		const zoomed = view.zoom > 1.001
+		dish.classList.toggle('is-zoomed', zoomed)
+		fit.hidden = !zoomed
+		state.overlayDirty = true
+	}
+
+	// zoom by factor, keeping the point under (cx, cy) where it is
+	function zoomAt(cx, cy, factor) {
+		const [px, py] = fromCss(cx, cy)
+		view.zoom = Math.min(MAX_ZOOM, Math.max(1, view.zoom * factor))
+		view.x = px - (cx - cssSize / 2) / scale()
+		view.y = py - (cy - cssSize / 2) / scale()
+		clampView()
+	}
+
+	function resetView() {
+		view.x = SIM / 2
+		view.y = SIM / 2
+		view.zoom = 1
+		clampView()
+	}
+	fit.addEventListener('click', resetView)
 
 	// --- The overlay: oat flakes, names, the real network -----------------------
 
@@ -458,15 +502,19 @@
 	function drawOverlay() {
 		const c = state.colors
 		const dpr = overlay.width / cssSize
-		const k = cssSize / SIM
+		const s = scale()
 		const z = Math.min(1.3, Math.max(0.7, cssSize / 820))
+		const fz = z * Math.min(1.8, Math.sqrt(view.zoom)) // flakes grow a little when you look closer
+		const [dcx, dcy] = toCss(SIM / 2, SIM / 2)
+		const dr = (SIM / 2) * s
+		const onScreen = (x, y, m = 24) => x > -m && y > -m && x < cssSize + m && y < cssSize + m
 		octx.setTransform(dpr, 0, 0, dpr, 0, 0)
 		octx.clearRect(0, 0, cssSize, cssSize)
 
 		if (state.showRail) {
 			octx.save()
 			octx.beginPath()
-			octx.arc(cssSize / 2, cssSize / 2, cssSize / 2 - 2, 0, TAU)
+			octx.arc(dcx, dcy, dr - 2, 0, TAU)
 			octx.clip()
 			octx.lineCap = 'round'
 			octx.lineJoin = 'round'
@@ -477,10 +525,9 @@
 					octx.beginPath()
 					BERLIN.edges.forEach(([a, b, mode], i) => {
 						if (mode !== pass) return
-						if (cov && cov[i] >= 0.5 !== built) return
-						if (!cov && !built) return
-						octx.moveTo(stations[a].x * k, stations[a].y * k)
-						octx.lineTo(stations[b].x * k, stations[b].y * k)
+						if (cov ? cov[i] >= 0.5 !== built : !built) return
+						octx.moveTo(...toCss(stations[a].x, stations[a].y))
+						octx.lineTo(...toCss(stations[b].x, stations[b].y))
 					})
 					octx.strokeStyle = pass === 'S' ? c.railS : c.railU
 					octx.lineWidth = (pass === 'S' ? 2.2 : 1.5) * z * (built ? 1 : 0.85)
@@ -494,22 +541,26 @@
 			octx.fillStyle = c.paper
 			octx.strokeStyle = c.ink
 			octx.lineWidth = 0.9
-			for (const s of stations) {
+			for (const st of stations) {
+				const [x, y] = toCss(st.x, st.y)
+				if (!onScreen(x, y)) continue
 				octx.beginPath()
-				octx.arc(s.x * k, s.y * k, 1.6 * z, 0, TAU)
+				octx.arc(x, y, 1.6 * fz, 0, TAU)
 				octx.fill()
 				octx.stroke()
 			}
 			octx.restore()
 		}
 
+		const flakeAt = state.flakes.map((f) => (f.alive ? toCss(f.x, f.y) : null))
 		state.flakes.forEach((f, i) => {
-			if (!f.alive) return
+			const at = flakeAt[i]
+			if (!at || !onScreen(...at)) return
 			const big = f.kind === 'code' ? 1.3 : 1
-			oatFlake(f.x * k, f.y * k, 4.4 * z * big, i + 1, state.reached.has(i) && f.kind !== 'code')
+			oatFlake(at[0], at[1], 4.4 * fz * big, i + 1, state.reached.has(i) && f.kind !== 'code')
 			if (f.kind === 'code') {
 				octx.beginPath()
-				octx.arc(f.x * k, f.y * k, 10 * z, 0, TAU)
+				octx.arc(at[0], at[1], 10 * fz, 0, TAU)
 				octx.strokeStyle = c.ink
 				octx.lineWidth = 1.4
 				octx.stroke()
@@ -517,20 +568,21 @@
 		})
 
 		// names, placed so they sit neither on each other nor on a flake
-		const placed = state.flakes.filter((f) => f.alive).map((f) => [f.x * k - 7 * z, f.y * k - 6 * z, 14 * z, 12 * z])
+		const placed = flakeAt.filter(Boolean).map(([x, y]) => [x - 7 * fz, y - 6 * fz, 14 * fz, 12 * fz])
 		const fontSize = Math.round(11 * Math.min(1.15, z))
 		const label = (text, x, y, strong) => {
 			octx.font = `${strong ? 700 : 600} ${fontSize}px ${c.mono}`
 			const w = octx.measureText(text).width
 			const h = fontSize + 2
-			const gap = 9 * z
+			const gap = 9 * fz
 			for (const [lx, ly] of [
 				[x + gap, y - h / 2],
 				[x - gap - w, y - h / 2],
 				[x - w / 2, y - gap - h],
 				[x - w / 2, y + gap],
 			]) {
-				if (Math.hypot(lx + w / 2 - cssSize / 2, ly + h / 2 - cssSize / 2) > cssSize / 2 - 14) continue
+				if (lx < 4 || ly < 4 || lx + w > cssSize - 4 || ly + h > cssSize - 4) continue
+				if (Math.hypot(lx + w / 2 - dcx, ly + h / 2 - dcy) > dr - 14) continue
 				if (placed.some((r) => lx < r[0] + r[2] && lx + w > r[0] && ly < r[1] + r[3] && ly + h > r[1])) continue
 				placed.push([lx - 2, ly - 1, w + 4, h + 2])
 				octx.textBaseline = 'middle'
@@ -544,12 +596,12 @@
 			}
 		}
 		const start = state.flakes[0]
-		if (start && start.kind === 'code' && start.alive) label('CODE', start.x * k + 5 * z, start.y * k, true)
+		if (start && start.kind === 'code' && flakeAt[0]) label('CODE', flakeAt[0][0] + 5 * fz, flakeAt[0][1], true)
 		if (state.showNames) {
 			// the flakes come busiest first, so a small dish names the big ones
-			let room = cssSize > 480 ? Infinity : 10
-			state.flakes.forEach((f) => {
-				if (f.alive && f.kind === 'station' && room-- > 0) label(f.name, f.x * k, f.y * k, false)
+			let room = cssSize * view.zoom > 480 ? Infinity : 10
+			state.flakes.forEach((f, i) => {
+				if (f.kind === 'station' && flakeAt[i] && onScreen(...flakeAt[i], 0) && room-- > 0) label(f.name, flakeAt[i][0], flakeAt[i][1], false)
 			})
 		}
 
@@ -568,8 +620,8 @@
 		octx.fill()
 		octx.textAlign = 'center'
 		octx.fillText('N', nx, ny + 14 * z)
-		const km = cssSize > 640 ? 5 : 2
-		const barW = km * PX_PER_KM * k
+		const km = [10, 5, 2, 1, 0.5].find((d) => d * PX_PER_KM * s <= 150 * z) || 0.5
+		const barW = km * PX_PER_KM * s
 		const bx = cssSize - 18 * z - barW, by = cssSize - 20 * z
 		octx.lineWidth = 1.5
 		octx.beginPath()
@@ -578,12 +630,12 @@
 		octx.lineTo(bx + barW, by)
 		octx.lineTo(bx + barW, by - 4)
 		octx.stroke()
-		octx.fillText(`${km} km`, bx + barW / 2, by - 8 * z)
+		octx.fillText(km < 1 ? `${km * 1000} m` : `${km} km`, bx + barW / 2, by - 8 * z)
 		octx.textAlign = 'start'
 
 		if (state.pointer && state.tool !== 'food') {
 			octx.beginPath()
-			octx.arc(state.pointer.x, state.pointer.y, BRUSH * k, 0, TAU)
+			octx.arc(state.pointer.x, state.pointer.y, BRUSH * s, 0, TAU)
 			octx.strokeStyle = c.ink
 			octx.setLineDash([3, 3])
 			octx.lineWidth = 1
@@ -599,8 +651,9 @@
 
 	const toSim = (e) => {
 		const r = overlay.getBoundingClientRect()
-		const x = e.clientX - r.left, y = e.clientY - r.top
-		return {cx: x, cy: y, x: (x / r.width) * SIM, y: (y / r.height) * SIM}
+		const cx = e.clientX - r.left, cy = e.clientY - r.top
+		const [x, y] = fromCss(cx, cy)
+		return {cx, cy, x, y}
 	}
 
 	function paint(from, to) {
@@ -621,13 +674,32 @@
 		}
 	}
 
+	// One finger or the mouse: the tool. With the oat flake tool a tap puts
+	// down or takes away a flake and a drag pans. Two fingers zoom and pan.
+	const pointers = new Map()
+	let pinch = null
+	let drag = null
+
+	const pinchNow = () => {
+		const [a, b] = [...pointers.values()]
+		return {dist: Math.hypot(a.cx - b.cx, a.cy - b.cy), cx: (a.cx + b.cx) / 2, cy: (a.cy + b.cy) / 2}
+	}
+
 	overlay.addEventListener('pointerdown', (e) => {
 		if (e.button !== 0 && e.pointerType === 'mouse') return
+		overlay.setPointerCapture(e.pointerId)
 		const p = toSim(e)
+		pointers.set(e.pointerId, {cx: p.cx, cy: p.cy})
+		if (pointers.size === 2) {
+			state.painting = null
+			drag = null
+			pinch = pinchNow()
+			return
+		}
+		if (pointers.size > 2) return
 		if (state.tool === 'food') {
-			toggleFlakeAt(p.x, p.y)
+			drag = {cx: p.cx, cy: p.cy, at: p, moved: false}
 		} else {
-			overlay.setPointerCapture(e.pointerId)
 			state.painting = p
 			state.paintNoted = false
 			paint(p, p)
@@ -636,7 +708,29 @@
 
 	overlay.addEventListener('pointermove', (e) => {
 		const p = toSim(e)
+		if (pointers.has(e.pointerId)) pointers.set(e.pointerId, {cx: p.cx, cy: p.cy})
 		state.pointer = {x: p.cx, y: p.cy}
+		if (pinch && pointers.size >= 2) {
+			const now = pinchNow()
+			zoomAt(now.cx, now.cy, now.dist / Math.max(1, pinch.dist))
+			view.x -= (now.cx - pinch.cx) / scale()
+			view.y -= (now.cy - pinch.cy) / scale()
+			clampView()
+			pinch = now
+			return
+		}
+		if (drag) {
+			const dx = p.cx - drag.cx, dy = p.cy - drag.cy
+			if (!drag.moved && Math.hypot(dx, dy) > 5) drag.moved = true
+			if (drag.moved && view.zoom > 1.001) {
+				view.x -= dx / scale()
+				view.y -= dy / scale()
+				clampView()
+				drag.cx = p.cx
+				drag.cy = p.cy
+			}
+			return
+		}
 		if (state.painting) {
 			paint(state.painting, p)
 			state.painting = p
@@ -645,18 +739,40 @@
 		showTip(p)
 	})
 
-	const endPaint = () => (state.painting = null)
-	overlay.addEventListener('pointerup', endPaint)
-	overlay.addEventListener('pointercancel', endPaint)
+	function release(e) {
+		pointers.delete(e.pointerId)
+		if (pinch) {
+			if (pointers.size < 2) pinch = null
+			return
+		}
+		if (drag && e.type === 'pointerup' && !drag.moved) toggleFlakeAt(drag.at.x, drag.at.y)
+		drag = null
+		state.painting = null
+	}
+	overlay.addEventListener('pointerup', release)
+	overlay.addEventListener('pointercancel', release)
 	overlay.addEventListener('pointerleave', () => {
 		state.pointer = null
 		tip.hidden = true
 		state.overlayDirty = true
 	})
 
+	overlay.addEventListener(
+		'wheel',
+		(e) => {
+			// on a phone-sized layout the page scrolls, so only a pinch (ctrl) zooms
+			if (matchMedia('(max-width: 860px)').matches && !e.ctrlKey) return
+			e.preventDefault()
+			const r = overlay.getBoundingClientRect()
+			const speed = e.deltaMode === 1 ? 0.05 : 0.0018
+			zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * speed))
+		},
+		{passive: false},
+	)
+
 	function showTip(p) {
 		if (coarse) return
-		const radius = (12 / cssSize) * SIM
+		const radius = 12 / scale()
 		let hit = null, hitD = radius, hitI = -1
 		state.flakes.forEach((f, i) => {
 			if (!f.alive) return
@@ -669,8 +785,9 @@
 		}
 		const status = hit.kind === 'code' ? 'the slime started here' : state.reached.has(hitI) ? 'reached' : 'not reached yet'
 		tip.textContent = `${hit.name} · ${status}`
-		tip.style.left = (hit.x / SIM) * cssSize + 'px'
-		tip.style.top = (hit.y / SIM) * cssSize + 'px'
+		const [x, y] = toCss(hit.x, hit.y)
+		tip.style.left = x + 'px'
+		tip.style.top = y + 'px'
 		tip.hidden = false
 	}
 
@@ -786,6 +903,16 @@
 			case '3':
 				setTool('erase')
 				break
+			case '+':
+			case '=':
+				zoomAt(cssSize / 2, cssSize / 2, 1.3)
+				break
+			case '-':
+				zoomAt(cssSize / 2, cssSize / 2, 1 / 1.3)
+				break
+			case '0':
+				resetView()
+				break
 		}
 	})
 
@@ -814,7 +941,7 @@
 			state.clock += dt
 		}
 		renderer.update(net)
-		renderer.render(now / 1000, {still: reducedMotion})
+		renderer.render(now / 1000, {still: reducedMotion, view})
 		state.frame++
 		if (state.frame % 12 === 0) {
 			checkReached()
@@ -842,7 +969,7 @@
 			state.steps += n
 			state.clock += n / 60
 			renderer.update(net)
-			renderer.render(performance.now() / 1000, {still: true})
+			renderer.render(performance.now() / 1000, {still: true, view})
 			checkReached()
 			updateHud()
 			updateVerdict()
@@ -851,5 +978,8 @@
 		},
 		setShowRail,
 		setTool,
+		view,
+		zoomAt,
+		resetView,
 	}
 })()
