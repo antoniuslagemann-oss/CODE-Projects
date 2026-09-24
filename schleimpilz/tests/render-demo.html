@@ -19,7 +19,7 @@
 		width: var(--size, min(100vw, 100vh));
 		height: var(--size, min(100vw, 100vh));
 		touch-action: none;
-		background: radial-gradient(closest-side, rgba(255, 176, 60, 0.13), rgba(255, 176, 60, 0.04) 70%, transparent);
+		background: radial-gradient(circle, rgba(255, 176, 60, 0.12), rgba(255, 176, 60, 0.05) 50%, transparent 72%);
 	}
 	#stage canvas {
 		position: absolute;
@@ -278,9 +278,9 @@
 		const m = DishRenderer.viewMatrix(view, glCanvas.width, glCanvas.height, SIM, SIM)
 		const sx = out.width / cw
 		const gx = (m[4] + (SIM / 2) * m[0] - cx) * sx, gy = (m[5] + (SIM / 2) * m[3] - cy) * sx
-		const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, (SIM / 2) * m[0] * sx)
-		glow.addColorStop(0, 'rgba(255, 176, 60, 0.13)')
-		glow.addColorStop(0.7, 'rgba(255, 176, 60, 0.04)')
+		const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, SIM * 0.72 * m[0] * sx)
+		glow.addColorStop(0, 'rgba(255, 176, 60, 0.12)')
+		glow.addColorStop(0.5 / 0.72, 'rgba(255, 176, 60, 0.05)')
 		glow.addColorStop(1, 'rgba(255, 176, 60, 0)')
 		ctx.fillStyle = glow
 		ctx.fillRect(0, 0, out.width, out.height)
