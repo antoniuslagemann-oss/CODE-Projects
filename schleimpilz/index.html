@@ -7,15 +7,15 @@
 <meta name="description" content="A slime mold grows a transit network across Berlin, starting at CODE University. Compare it with the real S-Bahn and U-Bahn.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,600;1,400&family=Caveat:wght@500;600&family=Fraunces:opsz,wght,SOFT,WONK@9..144,500..800,0..100,0..1&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,600;1,400&family=Caveat:wght@500;600&family=Fraunces:ital,opsz,wght,SOFT,WONK@0,9..144,400..800,0..100,0..1;1,9..144,400..800,0..100,0..1&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <!-- page -->
 <div class="app">
 	<header class="masthead">
-		<p class="eyebrow"><i>Physarum polycephalum</i> on a map of Berlin</p>
-		<h1>Schleimpilz</h1>
+		<h1 lang="de">Schleimpilz</h1>
+		<p class="species"><i lang="la">Physarum polycephalum</i> on a map of Berlin</p>
 		<p class="lede">In 2010, researchers put oat flakes on a map of the Tokyo area, one for each big city, and let a slime mold loose on it. The network it grew looked a lot like the region’s railways. This dish runs the same experiment on Berlin. The slime starts at CODE University in Neukölln, and there’s an oat flake on 37 of the city’s busiest stations.</p>
 	</header>
 
@@ -41,7 +41,7 @@
 				<label><input type="radio" name="setup" id="setup-ring" value="ring"><span>Ringbahn</span></label>
 				<label><input type="radio" name="setup" id="setup-none" value="none"><span>Only CODE</span></label>
 			</div>
-			<div class="row">
+			<div class="row transport">
 				<button type="button" id="play" class="button">Pause</button>
 				<button type="button" id="restart" class="button">Start over</button>
 				<label class="speed" for="speed">Speed <input type="range" id="speed" min="1" max="6" value="3"></label>
@@ -50,18 +50,19 @@
 
 		<div class="group">
 			<h2>Your hand</h2>
-			<div class="seg" role="radiogroup" aria-label="Tool">
-				<label><input type="radio" name="tool" id="tool-food" value="food" checked><span>Oat flake</span></label>
-				<label><input type="radio" name="tool" id="tool-light" value="light"><span>Light</span></label>
-				<label><input type="radio" name="tool" id="tool-erase" value="erase"><span>Dark</span></label>
+			<div class="seg tools" role="radiogroup" aria-label="Tool">
+				<label class="tool-food"><input type="radio" name="tool" id="tool-food" value="food" checked><span>Oat flake</span></label>
+				<label class="tool-light"><input type="radio" name="tool" id="tool-light" value="light"><span>Light</span></label>
+				<label class="tool-erase"><input type="radio" name="tool" id="tool-erase" value="erase"><span>Dark</span></label>
 			</div>
-			<p class="hint" id="hint">Click the dish to put down an oat flake. Click a flake to take it away.</p>
+			<p class="hint" id="hint" aria-live="polite">Click the dish to put down an oat flake. Click a flake to take it away.</p>
+			<p class="hint touch-hint">Pinch the dish to look closer, and to move around it.</p>
 		</div>
 
 		<div class="group">
 			<h2>Compare</h2>
-			<label class="switch"><input type="checkbox" id="show-rail"><span>Real S-Bahn and U-Bahn</span></label>
-			<label class="switch"><input type="checkbox" id="show-names" checked><span>Station names</span></label>
+			<label class="switch switch-rail"><input type="checkbox" role="switch" id="show-rail"><span>Real S-Bahn and U-Bahn</span></label>
+			<label class="switch"><input type="checkbox" role="switch" id="show-names" checked><span>Station names</span></label>
 			<ul class="legend" aria-label="Legend">
 				<li><i class="sw sw-slime"></i>Slime tubes</li>
 				<li><i class="sw sw-trace"></i>Where it has been</li>
@@ -91,7 +92,7 @@
 			<button type="button" id="reset-lab" class="button">Reset settings</button>
 		</details>
 
-		<p class="keys" id="keys"><kbd>Space</kbd> pause <kbd>R</kbd> start over <kbd>N</kbd> real network <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> tools</p>
+		<p class="keys" id="keys"><span><kbd>Space</kbd> pause</span> <span><kbd>R</kbd> start over</span> <span><kbd>N</kbd> real network</span> <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> tools</span> <span><kbd>+</kbd><kbd>−</kbd> zoom</span> <span><kbd>0</kbd> whole dish</span></p>
 
 		<footer class="notes">
 			<p>After <a href="https://doi.org/10.1126/science.1177894" target="_blank" rel="noopener">Tero et al., “Rules for Biologically Inspired Adaptive Network Design”, <i>Science</i> 327 (2010)</a>. Tubes carry protoplasm between the oat flakes. A tube that carries a lot grows thicker, one that carries little withers.</p>

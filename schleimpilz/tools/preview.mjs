@@ -222,7 +222,7 @@ function measure() {
 		if (found) braidKm += length[e] / PX_PER_KM
 	}
 	return {
-		ref, tubeKm: km, faintKm: faint, braided: km ? braidKm / km : 0, edges, nodes, components: nc, loops: edges - nodes + nc, deadEnds,
+		tube, ref, tubeKm: km, faintKm: faint, braided: km ? braidKm / km : 0, edges, nodes, components: nc, loops: edges - nodes + nc, deadEnds,
 		bridged: km ? bridgeKm / km : 0, connected, alive: living.length, detour: pairs ? detour / pairs : 0,
 		p50: ds.length ? ds[Math.floor(0.5 * (ds.length - 1))] : 0, p90: ds.length ? ds[Math.floor(0.9 * (ds.length - 1))] : 0,
 	}
@@ -299,10 +299,33 @@ function sheet(images) {
 	png(`${OUT}/sheet.png`, out, cols * w, rows * h)
 }
 
+// how much of the tube network is the same as at the last snapshot, and how
+// much the tube at each flake swells and shrinks as the flakes take turns
+let lastTubes = null
+const swing = new Map() // flake node -> [min, max] of its thickest tube lately
+const trackSwing = () => {
+	for (const f of net.flakes) {
+		if (!f.alive || f.node < 0) continue
+		let d = 0
+		for (let k = net.adjStart[f.node]; k < net.adjStart[f.node + 1]; k++) d = Math.max(d, net.D[net.adjEdge[k]])
+		const w = swing.get(f.node)
+		if (w) (w[0] = Math.min(w[0], d)), (w[1] = Math.max(w[1], d))
+		else swing.set(f.node, [d, d])
+	}
+}
+const settle = (m) => {
+	let same = 0, either = 0
+	if (lastTubes) for (let e = 0; e < net.edgeCount; e++) (same += lastTubes[e] & m.tube[e]), (either += lastTubes[e] | m.tube[e])
+	lastTubes = m.tube
+	const ratios = [...swing.values()].filter(([lo]) => lo > 0).map(([lo, hi]) => hi / lo).sort((p, q) => p - q)
+	swing.clear()
+	return {same: either ? same / either : 1, swing: ratios.length ? ratios[ratios.length >> 1] : 1}
+}
 const fmt = (m) =>
 	`flakes on the network ${m.connected}/${m.alive}, tubes ${m.tubeKm.toFixed(0)} km (+${m.faintKm.toFixed(0)} km faint), ` +
 	`loops ${m.loops}, ${(100 * m.bridged).toFixed(0)}% of it tree-like, ${(100 * m.braided).toFixed(0)}% braided, dead ends ${m.deadEnds}, pieces ${m.components}, ` +
-	`detour ${m.detour.toFixed(2)}, D median ${m.p50.toFixed(3)} p90 ${m.p90.toFixed(3)} top ${m.ref.toFixed(3)}`
+	`detour ${m.detour.toFixed(2)}, D median ${m.p50.toFixed(3)} p90 ${m.p90.toFixed(3)} top ${m.ref.toFixed(3)}, ` +
+	`${(100 * m.same).toFixed(0)}% same as before, flake tubes swing ${m.swing.toFixed(2)}x`
 
 // --- the hand, for ADAPT ---
 const nearTube = (x, y, r) => {
@@ -400,12 +423,14 @@ for (let s = 1; s <= STEPS; s++) {
 	times[s - 1] = performance.now() - ts
 	iters += net.solverIterations
 	maxIters = Math.max(maxIters, net.solverIterations)
+	trackSwing()
 	for (const w of watch) {
 		if (w.done || (net.steps - w.since) % 10) continue
 		if (w.goal(w.test())) (w.done = true), console.log(`  ${w.what}: done after ${net.steps - w.since} steps`)
 	}
 	if (s % EVERY === 0) {
 		const m = measure()
+		Object.assign(m, settle(m))
 		console.log(`step ${s}: reached ${net.reachedFlakes().length}/${net.flakes.filter((f) => f.alive).length}, ${fmt(m)}, ${((performance.now() - t) / EVERY).toFixed(2)} ms/step, ${(iters / EVERY).toFixed(1)} solver iterations/step (max ${maxIters})`)
 		images.push(snapshot(`net-${String(s).padStart(5, '0')}`, s))
 		t = performance.now(); iters = 0; maxIters = 0

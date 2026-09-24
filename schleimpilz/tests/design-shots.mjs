@@ -371,7 +371,8 @@ try {
 		// what is too small to hit with a finger
 		const small = await page.evaluate(() =>
 			[...document.querySelectorAll('button, summary, a, .seg label, .switch, input[type="range"]')]
-				.filter((el) => el.offsetParent !== null)
+				// links inside a sentence are exempt; everything else wants a finger's width
+				.filter((el) => el.offsetParent !== null && !(el.tagName === 'A' && el.closest('p')))
 				.map((el) => ({el, r: el.getBoundingClientRect()}))
 				.filter(({r}) => r.height < 44 || (r.width < 44 && r.width > 0))
 				.map(({el, r}) => `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${el.className ? '.' + String(el.className).split(' ')[0] : ''} ${Math.round(r.width)}×${Math.round(r.height)}`),
