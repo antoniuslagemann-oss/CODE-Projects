@@ -6,9 +6,10 @@
 // A frame is four draws:
 //  1. explored, at map size and kept from frame to frame: everywhere the
 //     slime has been. Only tubes grown since the last frame are added.
-//  2. track, at half map size: the sheet of protoplasm the tubes grow out
-//     of, the growing margin, faint marks where tubes have withered, and a
-//     soft copy of the living tubes that their glow is made from.
+//  2. track, at half map size: the growing margin, faint marks where tubes
+//     have withered, a soft copy of the living tubes that their glow is made
+//     from (all kept at their largest), and the sheet of protoplasm the tubes
+//     grow out of, added up from every tube so it comes out smooth.
 //  3. tubes, at screen size: every living tube as a capsule. Blending keeps
 //     the largest value of each channel, so tubes that meet become one smooth
 //     surface, like one organism. Channels: signed distance to the nearest
@@ -209,7 +210,7 @@ void main() {
 	// where it has gathered into a vein, less of it is left around
 	// a thin film over most of it, and bright channels where more flows
 	float D = a_dyn.x;
-	float sheet = tube * (0.5 * smoothstep(u_track.w, u_track.y, D) + 0.5 * smoothstep(u_track.y, 0.3, D)) * (1.0 - smoothstep(0.15, 0.7, r));
+	float sheet = tube * (0.4 * smoothstep(u_track.w, u_track.y, D) + 0.9 * smoothstep(2.0 * u_track.y, 0.38, D)) * (1.0 - smoothstep(0.15, 0.7, r));
 	float ghost = grown * a_flow.y;
 	float young = tube * youth;
 	float ext = 0.0;
@@ -244,7 +245,8 @@ void main() {
 	float r = v_a.w;
 	float g = max(d - 0.5 * r, 0.0) / (0.5 * r + 0.45 * u_track.z);
 	float soft = r > 0.0 ? exp(-g * g) * min(1.0, r / 1.4) : 0.0;
-	o = vec4(v_a.y * k, ghost, soft, v_young * k);
+	float s = max(1.0 - d * d / (u_track.x * u_track.x), 0.0);
+	o = vec4(v_young * k, ghost, soft, v_a.y * s * s);
 }`
 
 	const VS_EXPLORED = `#version 300 es
@@ -291,7 +293,7 @@ void main() {
 	const FS_DISH = `#version 300 es
 precision highp float;
 uniform sampler2D u_tubes; // screen size: distance to wall, height, radius, granules * height
-uniform sampler2D u_track; // half map size, with mipmaps: sheet, withered marks, soft tubes, growing margin
+uniform sampler2D u_track; // half map size, with mipmaps: growing margin, withered marks, soft tubes, sheet (summed)
 uniform sampler2D u_explored; // map size: where the slime has been, when, and how far it crawled
 uniform sampler2D u_env; // map size: light you shine, parkland, outside the city, mottling
 uniform sampler2D u_noise;
@@ -313,6 +315,20 @@ const vec2 LAMP = vec2(-0.6, -0.8);
 
 vec3 screen(vec3 a, vec3 b) {
 	return 1.0 - (1.0 - a) * (1.0 - b);
+}
+
+// The track at one mip level, filtered by hand so that it stays smooth
+// however far it is magnified: bilinear, with smoothstepped weights if asked.
+vec4 smoothTrack(int level, vec2 uv, bool smoother) {
+	ivec2 size = textureSize(u_track, level);
+	vec2 t = uv * vec2(size) - 0.5;
+	vec2 i = floor(t), f = t - i;
+	if (smoother) f = f * f * (3.0 - 2.0 * f);
+	ivec2 top = size - 1;
+	ivec2 a = clamp(ivec2(i), ivec2(0), top), b = clamp(ivec2(i) + 1, ivec2(0), top);
+	vec4 s00 = texelFetch(u_track, a, level), s10 = texelFetch(u_track, ivec2(b.x, a.y), level);
+	vec4 s01 = texelFetch(u_track, ivec2(a.x, b.y), level), s11 = texelFetch(u_track, b, level);
+	return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
 // how much of a pixel px wide a line w wide covers, d from its middle
@@ -347,8 +363,8 @@ void main() {
 	// light you shine: a pool of it, with a soft bloom around
 	float lamp = smoothstep(0.0, 0.9, textureLod(u_env, puv, 1.2).r);
 	float bloom = 0.5 * textureLod(u_env, puv, 3.0).r + 0.5 * far.r;
-	agar = mix(agar, u_light, lamp * 0.85);
-	agar += u_light * bloom * 0.28;
+	agar = mix(agar, u_light, lamp);
+	agar += u_light * bloom * 0.4;
 	// a very fine grain, and the faintest unevenness
 	float grain = texture(u_noise, p * 0.021).r - 0.5;
 	agar += vec3(0.011 * grain + 0.007 * (env.a - 0.5));
@@ -365,20 +381,26 @@ void main() {
 	agar = mix(agar, u_trace, explored * (0.65 + 0.35 * wet));
 	// the slow pulse that runs out from where it started, through all of it
 	float beat = u_beat.w * cos(u_beat.z * u_beat.x - ew.b * u_beat.y) * explored;
-	vec4 tr = mix(textureLod(u_track, uv, 0.7), textureLod(u_track, uv, 1.8), 0.45);
+	// through the hand lens the track is magnified a lot: filter it by hand
+	bool close = u_view.z > 2.5;
+	vec4 t1 = close ? smoothTrack(1, uv, true) : textureLod(u_track, uv, 1.2);
+	vec4 t3 = close ? smoothTrack(3, uv, true) : textureLod(u_track, uv, 3.3);
+	vec4 tr = close ? t1 : mix(textureLod(u_track, uv, 0.7), t1, 0.45);
+	// up close, the sheet from a smoother level, so it stays a veil
+	float sum = close ? smoothTrack(2, uv, true).a : tr.a;
 	vec3 gold = u_slime;
 	vec3 hot = u_core;
 	agar += gold * tr.g * 0.03; // marks of tubes that withered
 	// the sheet it spreads as: a veil of light, brightest at the growing margin
-	float sheet = smoothstep(0.03, 0.95, tr.r) * explored;
-	float young = smoothstep(0.0, 0.8, tr.a) * explored;
+	float sheet = (1.0 - exp(-sum)) * explored;
+	float young = smoothstep(0.0, 0.8, tr.r) * explored;
 	vec3 veil = mix(gold, hot, 0.2);
-	float glowSheet = textureLod(u_track, uv, 3.0).r * explored;
+	float glowSheet = (1.0 - exp(-t3.a)) * explored;
 	agar += mix(gold, hot, 0.3 * sheet) * (0.2 * sheet + 0.22 * young * young) * (1.0 + 0.2 * beat);
 	agar = screen(agar, gold * 0.1 * glowSheet * glowSheet);
 	// light from the tubes: a close glow and a wide one
-	float near = textureLod(u_track, uv, 1.3).b;
-	float wide = textureLod(u_track, uv, 3.4).b;
+	float near = t1.b;
+	float wide = t3.b;
 	agar = screen(agar, gold * (0.3 * near + 0.3 * wide) * (1.0 + 0.12 * beat));
 
 	vec3 col = agar;
@@ -441,7 +463,9 @@ void main() {
 	float kDisc = 1.0 - smoothstep(R - 0.5 * px, R + 0.5 * px, rr);
 	vec4 res = mix(outer, vec4(inside, 1.0), kDisc);
 	// dither away the banding in the dark gradients
-	res.rgb += (fract(52.9829189 * fract(dot(frag, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0 * res.a;
+	float n1 = fract(52.9829189 * fract(dot(frag, vec2(0.06711056, 0.00583715))));
+	float n2 = fract(52.9829189 * fract(dot(frag + 17.3, vec2(0.00583715, 0.06711056))));
+	res.rgb += (n1 + n2 - 1.0) / 255.0 * res.a;
 	o = vec4(clamp(res.rgb, 0.0, res.a), res.a);
 }`
 
@@ -1156,7 +1180,12 @@ void main() {
 				gl.useProgram(tr.p)
 				this.setInstanceUniforms(tr, 1, 0)
 				gl.uniform4f(tr.u.u_track, P.sheetRadius, P.sheetD, 4, P.sheetFloor)
+				// the sheet (alpha) adds up, the rest keeps the largest
+				gl.blendEquationSeparate(gl.MAX, gl.FUNC_ADD)
+				gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ONE, gl.ONE)
 				gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.instances)
+				gl.blendEquation(gl.MAX)
+				gl.blendFunc(gl.ONE, gl.ONE)
 			}
 			// the glow is made from blurred copies of the soft tubes
 			gl.bindFramebuffer(gl.FRAMEBUFFER, null)
