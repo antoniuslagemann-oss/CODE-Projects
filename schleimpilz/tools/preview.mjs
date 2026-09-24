@@ -282,6 +282,27 @@ function snapshot(name, label) {
 	return img
 }
 
+// When the growing edge gets where: bands of 50 steps each, from the time
+// the slime is put down.
+function fronts() {
+	const img = Buffer.alloc(W * H * 3)
+	for (let k = 0; k < W * H; k++) img.set(dist[k] < 1.6 ? [236, 238, 228] : [205, 212, 191], k * 3)
+	const band = 50 * net.params.growth * net.spacing * net.params.dt
+	for (let i = 0; i < net.nodeCount; i++) {
+		const t = net.arrival[i] / band
+		if (!isFinite(t)) continue
+		const c = Math.floor(t) & 1 ? [214, 160, 40] : [240, 200, 110]
+		const r = Math.ceil(net.spacing * 0.6)
+		for (let dy = -r; dy <= r; dy++)
+			for (let dx = -r; dx <= r; dx++) {
+				const x = Math.round(net.x[i] + dx), y = Math.round(net.y[i] + dy)
+				if (x >= 0 && y >= 0 && x < W && y < H && dx * dx + dy * dy <= r * r) img.set(c, (y * W + x) * 3)
+			}
+	}
+	for (const f of flakes) for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) if (dx * dx + dy * dy <= 9) img.set([90, 60, 30], (Math.round(f.y + dy) * W + Math.round(f.x + dx)) * 3)
+	png(`${OUT}/fronts.png`, img)
+}
+
 // a contact sheet: every snapshot at a third of the size, in rows of four
 function sheet(images) {
 	const s = 3, w = Math.floor(W / s), h = Math.floor(H / s), cols = 4, rows = Math.ceil(images.length / cols)
@@ -411,6 +432,7 @@ function shineLight() {
 }
 
 // --- run ---
+fronts()
 const times = new Float64Array(STEPS)
 const images = []
 let t = performance.now(), iters = 0, maxIters = 0
