@@ -20,23 +20,35 @@
 
 const DishRenderer = (() => {
 	const MAX_PUDDLES = 64
-	const GRANULE = 1.6 // map px, length of a granule along a tube
+	const COLORS = ['bench', 'rim', 'dish', 'park', 'outside', 'light', 'trace', 'slime', 'core']
+	const COLOR_UNIFORMS = COLORS.map((key) => 'u_' + key)
+	const DISH_TEXTURES = [
+		['tubeTex', 'u_tubes'],
+		['trackTex', 'u_track'],
+		['exploredTex', 'u_explored'],
+		['envTex', 'u_env'],
+		['noiseTex', 'u_noise'],
+	]
+	const GRANULE = 2.6 // map px, length of a granule along a tube
 	const WRAP = GRANULE * 64 // the granule pattern repeats after this many map px
 
 	const DEFAULTS = {
-		tubeRadius: 2.4, // map px, radius of the thickest trunk
+		tubeRadius: 3.2, // map px, radius of the thickest trunk
+		contrast: 1.3, // radius goes as (D^1/4)^contrast: 1 is Poiseuille, more sets trunks apart
 		freshRadius: 0.6, // map px, the fine veins of a fresh sheet
 		witheredD: 3e-4, // conductivity below which a tube has withered away
 		veinFade: 2.2, // model time for a fresh vein to fade
 		matureFrom: 0.5, // model time from which a tube starts to thicken...
 		matureBy: 6, // ...and by which it has its full width
-		filmFade: 1.1, // model time for the fresh sheet to dry into track
+		filmFade: 1.6, // model time for the fresh sheet to dry into track
 		filmRadius: 6.5, // map px
 		exploreRadius: 5.5, // map px
 		flowLow: 0.004, // smoothed |Q| from which a tube counts as carrying flow...
 		flowHigh: 0.03, // ...and from which it fully does
 		puddle: 9, // map px, radius of the slime on an oat flake
 		ghostFade: 80, // model time for the mark of a withered tube to fade
+		wetFade: 14, // model time for the track the slime leaves to dry
+		smoothPaths: 4, // rounds of smoothing that turn the mesh's zigzags into curves
 		breathe: 0.045, // how much tubes widen and narrow with each pulse
 		pulse: 5.5, // seconds per pulse
 		wave: 240, // crawl distance per wavelength of the pulse
@@ -68,6 +80,7 @@ uniform float u_time; // model time
 uniform float u_clock; // seconds
 uniform float u_motion; // 0 when still
 uniform vec4 u_tube; // thickest radius, reference rho, withered rho, fresh radius
+uniform float u_contrast;
 uniform vec4 u_life; // vein fade, breathing, pulse rate, pulse wavenumber
 uniform vec2 u_mature; // model time from which a tube starts to thicken, and by which it has
 
@@ -85,11 +98,14 @@ float radiusOf(out float youth) {
 	float age = max(u_time - born, 0.0);
 	if (a_aux.w > 0.5) return a_dyn.x * smoothstep(0.0, 1.2, age);
 	float rho = pow(a_dyn.x, 0.25) / u_tube.y;
-	float net = u_tube.x * rho * smoothstep(u_tube.z, u_tube.z * 1.9, rho);
+	float net = u_tube.x * pow(rho, u_contrast) * smoothstep(u_tube.z, u_tube.z * 1.9, rho);
 	float len = distance(a_seg.xy, a_seg.zw);
 	float along = clamp(abs(a_aux.y - a_aux.x) / max(len, 1e-3), 0.0, 1.0);
 	youth = exp(-age / u_life.x);
-	float vein = u_tube.w * (0.15 + 0.85 * smoothstep(0.3, 0.9, along)) * youth;
+	// a random few of the fresh edges, mostly those along the way it grows
+	float keep = step(fract(a_aux.z * 7.31), 0.06 + 0.55 * smoothstep(0.72, 0.97, along));
+	// veins form a little behind the front, which is one film
+	float vein = u_tube.w * keep * (0.6 + 0.5 * fract(a_aux.z * 3.7)) * youth * smoothstep(0.25, 0.9, age);
 	return max(vein, net * a_flow.x * smoothstep(u_mature.x, u_mature.y, age));
 }
 
@@ -162,8 +178,8 @@ void main() {
 	float len = v_a.x;
 	bool puddle = v_b.y > 0.5;
 	// tubes are a little uneven along their length, puddles ragged at the edge
-	float wobble = texture(u_noise, v_world * (puddle ? 0.035 : 0.012)).g - 0.5;
-	float r = v_a.y * (1.0 + (puddle ? 0.5 : 0.22) * wobble);
+	float wobble = texture(u_noise, v_world * (puddle ? 0.009 : 0.0045)).g - 0.5;
+	float r = v_a.y * (1.0 + (puddle ? 0.3 : 0.22) * wobble);
 	vec2 q = vec2(v_local.x - clamp(v_local.x, 0.0, len), v_local.y);
 	float sdf = (r - length(q)) * u_scale;
 	if (sdf < -u_margin) discard;
@@ -172,9 +188,11 @@ void main() {
 	float h = sqrt(s * (2.0 * rpx - s)); // a round cross-section
 	if (puddle) h = min(h * 0.45, 2.2 * u_scale); // puddles are flat
 	// granules in the streaming protoplasm, carried along by the offset
-	vec2 cell = vec2((v_local.x - v_a.w) / ${GRANULE.toFixed(2)}, v_local.y / max(r, 0.4));
+	vec2 cell = vec2((v_local.x - v_a.w) / ${GRANULE.toFixed(2)}, v_local.y / max(0.45 * r, 0.4));
 	float grain = texture(u_noise, cell * (4.0 / 256.0) + v_b.x).b;
-	o = vec4(sdf, h, sdf > 0.0 ? v_a.z : 0.0, grain * h);
+	// a puddle reads as a thick tube, not as the thickest there is
+	float shown = puddle ? min(v_a.z, 1.7 * u_scale) : v_a.z;
+	o = vec4(sdf, h, sdf > 0.0 ? shown : 0.0, grain * h);
 }`
 
 	const VS_TRACK = `#version 300 es
@@ -231,7 +249,9 @@ uniform float u_bornAfter;
 uniform float u_reach;
 out vec2 v_local;
 flat out float v_len;
+flat out float v_born;
 void main() {
+	v_born = a_dyn.y;
 	if (a_dyn.y <= u_bornAfter || a_dyn.x < 0.0) {
 		gl_Position = NOWHERE;
 		return;
@@ -248,18 +268,22 @@ void main() {
 precision highp float;
 in vec2 v_local;
 flat in float v_len;
+flat in float v_born;
 uniform float u_reach;
 out vec4 o;
 void main() {
 	float d = length(vec2(v_local.x - clamp(v_local.x, 0.0, v_len), v_local.y));
-	o = vec4(1.0 - smoothstep(u_reach * 0.3, u_reach, d), 0.0, 0.0, 0.0);
+	float k = 1.0 - smoothstep(u_reach * 0.3, u_reach, d);
+	o = vec4(k, k > 0.3 ? v_born : 0.0, 0.0, 0.0);
 }`
 
 	const FS_DISH = `#version 300 es
 precision highp float;
 uniform sampler2D u_tubes; // screen size: distance to wall, height, radius, granules * height
 uniform sampler2D u_track; // map size: fresh film, withered marks, soft tubes
-uniform sampler2D u_explored; // map size: where the slime has been
+uniform sampler2D u_explored; // map size: where the slime has been, and when it got there
+uniform float u_time;
+uniform float u_wetFade;
 uniform sampler2D u_env; // map size: light you shine, parkland, outside the city, mottling
 uniform sampler2D u_noise;
 uniform vec2 u_canvas;
@@ -318,15 +342,28 @@ void main() {
 	agar = screen(agar, vec3(mix(0.3, 0.22, u_dark) * band(m, 1.4, 0.6 + px)) * mix(u_outside, vec3(1.0), 0.5));
 
 	// --- where the slime has been --------------------------------------------
-	float ex = texture(u_explored, uv).r;
-	float explored = smoothstep(0.3, 0.7, ex);
+	vec2 exw = texture(u_explored, uv).rg;
+	// the edge of where it has been, softened and lobed
+	float lobe = texture(u_noise, p * 0.0036).g - 0.5;
+	float ex = textureLod(u_explored, uv, 1.6).r + 0.3 * lobe;
+	float explored = smoothstep(0.42, 0.58, ex);
+	// slime the organism has just left is still wet; it dries to a faint track
+	float wet = exp(-max(u_time - exw.g, 0.0) / u_wetFade);
 	vec4 tr = texture(u_track, uv);
-	agar = mix(agar, u_trace, explored * 0.6);
+	agar = mix(agar, u_trace, explored * mix(0.16 + 0.34 * wet, 0.42 + 0.2 * wet, u_dark));
 	agar = mix(agar, mix(u_trace, u_core, 0.3), tr.g * 0.45);
-	// the fresh sheet at the growing edge, thickest at its very front
-	float film = smoothstep(0.0, 0.9, tr.r) * explored;
-	float front = tr.r * explored * (1.0 - smoothstep(0.55, 0.95, ex));
-	agar = mix(agar, mix(u_trace, u_slime, 0.6), film * 0.45 + front * 0.35);
+	// the fresh sheet at the growing edge: one film at the very front; behind
+	// it holes open up and it becomes a lace of fine veins, which fades
+	float fresh = tr.r * explored;
+	float cellsLace = texture(u_noise, p * (1.0 / 200.0)).a * 4.0; // map px / 1.75 to a cell border
+	float veinW = mix(0.12, 0.5, smoothstep(0.05, 0.7, fresh)) / 1.75;
+	float lace = 1.0 - smoothstep(veinW - 0.6 * px, veinW + 0.6 * px, cellsLace);
+	float sheet = smoothstep(0.45, 0.95, fresh + 0.25 * lobe);
+	float veins = lace * smoothstep(0.03, 0.35, fresh);
+	float front = fresh * (1.0 - smoothstep(0.62, 0.9, ex));
+	vec3 film = mix(u_trace, u_slime, 0.55);
+	agar = mix(agar, film, max(sheet * 0.5, veins * 0.62));
+	agar = mix(agar, mix(u_slime, u_core, 0.25), front * 0.45);
 
 	// shadow of the tubes, away from the lamp; in the dark they glow instead
 	vec2 sp = p + LAMP * 2.4;
@@ -394,7 +431,7 @@ void main() {
 	float kGlass = smoothstep(inner - 0.5 * px, inner + 0.5 * px, rr);
 	float kBench = smoothstep(R - 0.5 * px, R + 0.5 * px, rr);
 	vec3 outc = mix(mix(col, glass, kGlass), bench, kBench);
-	outc += (texture(u_noise, frag / 256.0).a - 0.5) / 255.0;
+	outc += (fract(52.9829189 * fract(dot(frag, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;
 	o = vec4(outc, 1.0);
 }`
 
@@ -409,6 +446,37 @@ void main() {
 		x = Math.imul(x ^ (x >>> 16), 0x7feb352d)
 		x = Math.imul(x ^ (x >>> 15), 0x846ca68b)
 		return (x ^ (x >>> 16)) >>> 0
+	}
+
+	// Distance to the nearest border between random cells, which tiles: small
+	// on the borders, so thresholding it draws a lace of irregular polygons.
+	function cellBorders(size, cell, seed) {
+		const n = size / cell
+		const fx = new Float32Array(n * n), fy = new Float32Array(n * n)
+		for (let i = 0; i < n * n; i++) {
+			fx[i] = ((i % n) + 0.12 + 0.76 * (hash(i * 2 + seed * 7717) / 4294967296)) * cell
+			fy[i] = (Math.floor(i / n) + 0.12 + 0.76 * (hash(i * 2 + 1 + seed * 7717) / 4294967296)) * cell
+		}
+		const out = new Float32Array(size * size)
+		for (let y = 0; y < size; y++) {
+			const cy = Math.floor(y / cell)
+			for (let x = 0; x < size; x++) {
+				const cx = Math.floor(x / cell)
+				let f1 = Infinity, f2 = Infinity
+				for (let dy = -1; dy <= 1; dy++) {
+					for (let dx = -1; dx <= 1; dx++) {
+						const i = cx + dx, j = cy + dy
+						const k = ((j + n) % n) * n + ((i + n) % n)
+						const px = fx[k] + (i - ((i + n) % n)) * cell, py = fy[k] + (j - ((j + n) % n)) * cell
+						const d = Math.hypot(x + 0.5 - px, y + 0.5 - py)
+						if (d < f1) (f2 = f1), (f1 = d)
+						else if (d < f2) f2 = d
+					}
+				}
+				out[y * size + x] = f2 - f1
+			}
+		}
+		return out
 	}
 
 	// Smooth noise that tiles, 0..1, on a size x size grid with features about
@@ -474,22 +542,24 @@ void main() {
 			this.envTex = this.texture(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, width, height, {mipmaps: true})
 			this.envDirty = [0, 0, width, height]
 
-			// r fine grain, g smooth wobble, b granules, a dither
+			// r fine grain, g smooth wobble, b granules, a lace of cell borders
 			const S = 256
 			const fine = valueNoise(S, 2, 4), fine2 = valueNoise(S, 4, 5), gran = valueNoise(S, 4, 6), gran2 = valueNoise(S, 2, 7)
 			const soft = valueNoise(S, 16, 8), soft2 = valueNoise(S, 8, 9)
+			const lace = cellBorders(S, 8, 10)
 			const noise = new Uint8Array(S * S * 4)
 			for (let i = 0; i < S * S; i++) {
 				const g = smoothstep(0.3, 0.8, 0.7 * gran[i] + 0.3 * gran2[i])
 				noise[i * 4] = Math.round(255 * (0.6 * fine[i] + 0.4 * fine2[i]))
 				noise[i * 4 + 1] = Math.round(255 * Math.min(1, Math.max(0, (0.65 * soft[i] + 0.35 * soft2[i] - 0.5) * 1.7 + 0.5)))
 				noise[i * 4 + 2] = Math.round(255 * g)
-				noise[i * 4 + 3] = hash(i + 99991) >>> 24
+				noise[i * 4 + 3] = Math.round(255 * Math.min(1, lace[i] / 4))
 			}
 			this.noiseTex = this.texture(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, S, S, {repeat: true, mipmaps: true, data: noise})
 
-			this.exploredTex = this.texture(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, width, height)
+			this.exploredTex = this.texture(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, width, height, {mipmaps: true})
 			this.exploredFbo = this.framebuffer(this.exploredTex)
+			gl.generateMipmap(gl.TEXTURE_2D)
 			this.trackTex = this.texture(gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, width, height)
 			this.trackFbo = this.framebuffer(this.trackTex)
 			this.tubeTex = null
@@ -512,6 +582,8 @@ void main() {
 			this.exploredClear = true
 			this.Dref = 0.4
 			this.cpuMs = 0
+			this.viewOut = new Float64Array(6)
+			this.clearTubes = new Float32Array(4)
 		}
 
 		program(vsSource, fsSource) {
@@ -681,6 +753,17 @@ void main() {
 			this.phase = new Float32Array(E)
 			this.dir = new Int8Array(E)
 			this.mid = new Float32Array(E) // crawl distance at the middle of each tube
+			this.sizes = new Float32Array(E)
+			this.visible = new Int32Array(E)
+			// where each node is drawn: tubes through a node are smoothed into curves
+			this.drawX = Float32Array.from(net.x)
+			this.drawY = Float32Array.from(net.y)
+			this.aimX = new Float32Array(N)
+			this.aimY = new Float32Array(N)
+			this.sumX = new Float32Array(N)
+			this.sumY = new Float32Array(N)
+			this.degree = new Uint8Array(N)
+			this.pinned = new Uint8Array(N)
 			const {x, y, a, b} = net
 			for (let e = 0; e < E; e++) {
 				this.geo.set([x[a[e]], y[a[e]], x[b[e]], y[b[e]]], e * 4)
@@ -756,10 +839,78 @@ void main() {
 			}
 			this.flakeKey = null
 			this.syncPuddles(net)
+			this.drawX.set(net.x)
+			this.drawY.set(net.y)
+			this.geoDirty = true
 			this.modelTime = net.time || 0
 			this.start = net.start
 			this.snap = true
 			this.exploredClear = true
+		}
+
+		// Tubes run along a mesh, so a path zigzags from node to node. Where a
+		// node carries just one tube through, draw it a little towards its
+		// neighbours; a few rounds of that turn zigzags into curves. Junctions
+		// and oat flakes stay put. Nodes glide to their new places.
+		smoothPaths(count, snap) {
+			const net = this.net
+			const {visible, degree, pinned, aimX, aimY, sumX, sumY, drawX, drawY, geo} = this
+			const {a, b} = net
+			degree.fill(0)
+			for (let i = 0; i < count; i++) degree[a[visible[i]]]++, degree[b[visible[i]]]++
+			aimX.set(net.x)
+			aimY.set(net.y)
+			for (let round = 0; round < this.params.smoothPaths; round++) {
+				sumX.fill(0)
+				sumY.fill(0)
+				for (let i = 0; i < count; i++) {
+					const e = visible[i], p = a[e], q = b[e]
+					sumX[p] += aimX[q]
+					sumY[p] += aimY[q]
+					sumX[q] += aimX[p]
+					sumY[q] += aimY[p]
+				}
+				for (let i = 0; i < 2 * count; i++) {
+					const e = visible[i >> 1]
+					const n = i & 1 ? b[e] : a[e]
+					if (degree[n] !== 2 || pinned[n] || sumX[n] === 0) continue
+					aimX[n] = 0.5 * aimX[n] + 0.25 * sumX[n]
+					aimY[n] = 0.5 * aimY[n] + 0.25 * sumY[n]
+					sumX[n] = 0 // once per round
+				}
+			}
+			const k = snap ? 1 : 0.12
+			let moved = false
+			for (let n = 0, N = this.nodeCount; n < N; n++) {
+				const dx = aimX[n] - drawX[n], dy = aimY[n] - drawY[n]
+				if (dx === 0 && dy === 0) continue
+				if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) {
+					drawX[n] = aimX[n]
+					drawY[n] = aimY[n]
+				} else {
+					drawX[n] += dx * k
+					drawY[n] += dy * k
+				}
+				moved = true
+			}
+			if (!moved && !this.geoDirty) return
+			let lo = Infinity, hi = -1
+			for (let e = 0, E = this.edgeCount; e < E; e++) {
+				const o = e * 4, p = a[e], q = b[e]
+				if (geo[o] === drawX[p] && geo[o + 1] === drawY[p] && geo[o + 2] === drawX[q] && geo[o + 3] === drawY[q]) continue
+				geo[o] = drawX[p]
+				geo[o + 1] = drawY[p]
+				geo[o + 2] = drawX[q]
+				geo[o + 3] = drawY[q]
+				if (e < lo) lo = e
+				hi = e
+			}
+			this.geoDirty = false
+			if (hi < 0) return
+			const gl = this.gl
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.geoBuf)
+			gl.bufferSubData(gl.ARRAY_BUFFER, lo * 16, geo, lo * 4, (hi - lo + 1) * 4)
+			gl.bindBuffer(gl.ARRAY_BUFFER, null)
 		}
 
 		// the slime on the oat flakes it has reached
@@ -774,10 +925,12 @@ void main() {
 			if (key === this.flakeKey) return
 			this.flakeKey = key
 			this.puddles = []
+			this.pinned.fill(0)
 			const E = this.edgeCount
 			for (let i = 0; i < flakes.length && this.puddles.length < MAX_PUDDLES; i++) {
 				const f = flakes[i]
 				if (!f.alive || !(f.node >= 0)) continue
+				this.pinned[f.node] = 1
 				const place = this.flakeList && this.flakeList[i]
 				const px = place ? place.x : net.x[f.node], py = place ? place.y : net.y[f.node]
 				const k = this.puddles.length
@@ -811,7 +964,8 @@ void main() {
 			const {D, born, alive, a, b, flow} = net
 			const flux = net.flux && net.flux.length === E ? net.flux : null
 			const minD = (net.params && net.params.minD) || 1e-4
-			const {dynF, dynU, qMean, qAbs, ghost, phase, dir, mid} = this
+			const {dynF, dynU, qMean, qAbs, ghost, phase, dir, mid, sizes, visible} = this
+			let count = 0
 
 			let dt = this.lastClock === null ? 0 : seconds - this.lastClock
 			if (!(dt > 0)) dt = 0
@@ -833,6 +987,7 @@ void main() {
 				const o = e * 4
 				if (!(born[e] > 0) || !alive[a[e]] || !alive[b[e]]) {
 					dynF[o] = -1
+					sizes[e] = 0
 					continue
 				}
 				const d = D[e]
@@ -843,7 +998,8 @@ void main() {
 				const carries = smoothstep(P.flowLow, P.flowHigh, mag)
 				const rho = Math.sqrt(Math.sqrt(Math.max(d, 0) / Dref))
 				const mature = smoothstep(P.matureFrom, P.matureBy, net.time - born[e])
-				const size = carries * mature * rho * smoothstep(rhoCut, rhoCut * 1.9, rho)
+				const size = carries * mature * Math.pow(rho, P.contrast) * smoothstep(rhoCut, rhoCut * 1.9, rho)
+				sizes[e] = size
 				const g = Math.max(ghost[e] * keep, Math.min(1, size))
 				ghost[e] = g
 				if (move > 0 && carries > 0.01 && mag > 0) {
@@ -855,6 +1011,7 @@ void main() {
 					else if (ph < 0) ph += WRAP
 					phase[e] = ph
 				}
+				if (size > 0.12) visible[count++] = e
 				dynF[o] = d
 				dynF[o + 1] = born[e]
 				dynF[o + 2] = phase[e]
@@ -863,6 +1020,8 @@ void main() {
 			}
 			const target = Math.max(maxD, (net.params && net.params.fresh) || 0.05, 1e-3)
 			this.Dref = this.snap ? target : Dref + (target - Dref) * k
+			// nodes glide to smoothed places, unless nothing may move or the model jumped ahead
+			this.smoothPaths(count, this.snap || still || modelDt > 0.5)
 			this.snap = false
 
 			// puddles: the slime on reached oat flakes
@@ -920,6 +1079,7 @@ void main() {
 			gl.uniform4f(u.u_tube, P.tubeRadius, rhoRef, Math.sqrt(Math.sqrt(P.witheredD / this.Dref)), P.freshRadius)
 			gl.uniform4f(u.u_life, P.veinFade, P.breathe, (2 * Math.PI) / P.pulse, (2 * Math.PI) / P.wave)
 			gl.uniform2f(u.u_mature, P.matureFrom, P.matureBy)
+			gl.uniform1f(u.u_contrast, P.contrast)
 		}
 
 		// seconds: a clock for the slow life in the tubes. {still: true} holds
@@ -941,7 +1101,7 @@ void main() {
 			this.cpuMs = performance.now() - t0
 
 			const [w, h] = this.tubeSize
-			const m = DishRenderer.viewMatrix(opts && opts.view, w, h, this.width, this.height)
+			const m = DishRenderer.viewMatrix(opts && opts.view, w, h, this.width, this.height, this.viewOut)
 			const scale = m[0]
 			const cx = (w / 2 - m[4]) / scale, cy = (h / 2 - m[5]) / scale
 			const tap = Math.min(3.5, Math.max(1, 0.8 * scale))
@@ -955,6 +1115,7 @@ void main() {
 				gl.clear(gl.COLOR_BUFFER_BIT)
 				this.exploredAfter = -1
 				this.exploredClear = false
+				this.exploredMips = true
 			}
 			gl.bindFramebuffer(gl.FRAMEBUFFER, this.trackFbo)
 			gl.clearColor(0, 0, 0, 0)
@@ -977,6 +1138,7 @@ void main() {
 					gl.uniform1f(ex.u.u_reach, P.exploreRadius)
 					gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.instances)
 					this.exploredAfter = time
+					this.exploredMips = true
 				}
 
 				// 2. fresh sheet, withered marks, soft tubes
@@ -988,10 +1150,18 @@ void main() {
 				gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.instances)
 			}
 
+			if (this.exploredMips) {
+				gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+				gl.bindTexture(gl.TEXTURE_2D, this.exploredTex)
+				gl.generateMipmap(gl.TEXTURE_2D)
+				this.exploredMips = false
+			}
+
 			// 3. the tubes, at screen size
 			gl.bindFramebuffer(gl.FRAMEBUFFER, this.tubeFbo)
 			gl.viewport(0, 0, w, h)
-			gl.clearBufferfv(gl.COLOR, 0, [-margin, 0, 0, 0])
+			this.clearTubes[0] = -margin
+			gl.clearBufferfv(gl.COLOR, 0, this.clearTubes)
 			if (net && this.instances > 0) {
 				const tu = this.programs.tube
 				gl.useProgram(tu.p)
@@ -1014,12 +1184,10 @@ void main() {
 			gl.bindFramebuffer(gl.FRAMEBUFFER, null)
 			gl.viewport(0, 0, w, h)
 			gl.useProgram(d.p)
-			const textures = [this.tubeTex, this.trackTex, this.exploredTex, this.envTex, this.noiseTex]
-			const names = ['u_tubes', 'u_track', 'u_explored', 'u_env', 'u_noise']
-			for (let i = 0; i < textures.length; i++) {
+			for (let i = 0; i < DISH_TEXTURES.length; i++) {
 				gl.activeTexture(gl.TEXTURE0 + i)
-				gl.bindTexture(gl.TEXTURE_2D, textures[i])
-				gl.uniform1i(d.u[names[i]], i)
+				gl.bindTexture(gl.TEXTURE_2D, this[DISH_TEXTURES[i][0]])
+				gl.uniform1i(d.u[DISH_TEXTURES[i][1]], i)
 			}
 			gl.uniform2f(d.u.u_canvas, w, h)
 			gl.uniform2f(d.u.u_sim, this.width, this.height)
@@ -1028,9 +1196,9 @@ void main() {
 			gl.uniform1f(d.u.u_tap, tap)
 			gl.uniform1f(d.u.u_margin, margin)
 			gl.uniform1f(d.u.u_rMax, P.tubeRadius)
-			for (const key of ['bench', 'rim', 'dish', 'park', 'outside', 'light', 'trace', 'slime', 'core']) {
-				gl.uniform3fv(d.u['u_' + key], pal[key])
-			}
+			gl.uniform1f(d.u.u_time, net ? net.time : 0)
+			gl.uniform1f(d.u.u_wetFade, P.wetFade)
+			for (let i = 0; i < COLORS.length; i++) gl.uniform3fv(d.u[COLOR_UNIFORMS[i]], pal[COLORS[i]])
 			gl.bindVertexArray(this.emptyVao)
 			gl.drawArrays(gl.TRIANGLES, 0, 3)
 			gl.bindVertexArray(null)
@@ -1055,10 +1223,12 @@ void main() {
 				const age = Math.max(0, net.time - this.dynF[o + 1])
 				const carries = this.dynU[o * 2 + 6] / 65535
 				const rho = Math.sqrt(Math.sqrt(d)) / rhoRef
-				const rNet = P.tubeRadius * rho * smoothstep(rhoCut, rhoCut * 1.9, rho)
+				const rNet = P.tubeRadius * Math.pow(rho, P.contrast) * smoothstep(rhoCut, rhoCut * 1.9, rho)
 				const len = Math.hypot(this.geo[o + 2] - this.geo[o], this.geo[o + 3] - this.geo[o + 1])
 				const along = Math.min(1, Math.abs(this.aux[o + 1] - this.aux[o]) / Math.max(len, 1e-3))
-				const vein = P.freshRadius * (0.15 + 0.85 * smoothstep(0.3, 0.9, along)) * Math.exp(-age / P.veinFade)
+				const seed = this.aux[o + 2]
+				const keep = (seed * 7.31) % 1 <= 0.06 + 0.55 * smoothstep(0.72, 0.97, along) ? 1 : 0
+				const vein = P.freshRadius * keep * (0.6 + 0.5 * ((seed * 3.7) % 1)) * Math.exp(-age / P.veinFade) * smoothstep(0.25, 0.9, age)
 				const r = Math.max(vein, rNet * carries * smoothstep(P.matureFrom, P.matureBy, age))
 				if (r * scale < 0.04) continue
 				if (r > vein) tubes++
@@ -1078,12 +1248,18 @@ void main() {
 	//   x = (cx - m[4]) / m[0], y = (cy - m[5]) / m[3]
 	// view: {x, y, zoom}, the map point at the centre of the canvas and the
 	// zoom (1: the whole map fits, as without a view).
-	DishRenderer.viewMatrix = (view, canvasWidth, canvasHeight, width = 1024, height = width) => {
+	DishRenderer.viewMatrix = (view, canvasWidth, canvasHeight, width = 1024, height = width, out = new Array(6)) => {
 		const zoom = view && view.zoom > 0 ? view.zoom : 1
 		const x = view && Number.isFinite(view.x) ? view.x : width / 2
 		const y = view && Number.isFinite(view.y) ? view.y : height / 2
 		const s = Math.min(canvasWidth / width, canvasHeight / height) * zoom
-		return [s, 0, 0, s, canvasWidth / 2 - x * s, canvasHeight / 2 - y * s]
+		out[0] = s
+		out[1] = 0
+		out[2] = 0
+		out[3] = s
+		out[4] = canvasWidth / 2 - x * s
+		out[5] = canvasHeight / 2 - y * s
+		return out
 	}
 
 	return DishRenderer
