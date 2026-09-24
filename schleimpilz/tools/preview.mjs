@@ -167,12 +167,12 @@ function measure() {
 	for (let i = 0; i < N; i++) if (comp[i] >= 0) sizes[comp[i]]++
 	let main = -1
 	for (const f of net.flakes) if (f.alive && f.node >= 0 && comp[f.node] >= 0 && (main < 0 || sizes[comp[f.node]] > sizes[main])) main = comp[f.node]
-	const alive = net.flakes.filter((f) => f.alive && f.node >= 0)
-	const connected = alive.filter((f) => comp[f.node] === main && main >= 0).length
+	const living = net.flakes.filter((f) => f.alive && f.node >= 0)
+	const connected = living.filter((f) => comp[f.node] === main && main >= 0).length
 	// how far out of the way the network runs between neighbouring flakes
 	let detour = 0, pairs = 0
 	if (main >= 0) {
-		const nodesOf = alive.filter((f) => comp[f.node] === main).map((f) => f.node)
+		const nodesOf = living.filter((f) => comp[f.node] === main).map((f) => f.node)
 		for (const s of nodesOf) {
 			const d = new Float64Array(N).fill(Infinity)
 			d[s] = 0
@@ -194,7 +194,7 @@ function measure() {
 	}
 	return {
 		ref, tubeKm: km, faintKm: faint, edges, nodes, components: nc, loops: edges - nodes + nc, deadEnds,
-		bridged: km ? bridgeKm / km : 0, connected, alive: alive.length, detour: pairs ? detour / pairs : 0,
+		bridged: km ? bridgeKm / km : 0, connected, alive: living.length, detour: pairs ? detour / pairs : 0,
 		p50: ds.length ? ds[Math.floor(0.5 * (ds.length - 1))] : 0, p90: ds.length ? ds[Math.floor(0.9 * (ds.length - 1))] : 0,
 	}
 }
