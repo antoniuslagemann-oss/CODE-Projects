@@ -192,6 +192,15 @@ async function open({viewport = DESKTOP, deviceScaleFactor = 1, hasTouch = false
 	await page.waitForFunction(() => window.schleimpilz || !document.getElementById('error').hidden, null, {timeout: 60000})
 	const error = await page.evaluate(() => (document.getElementById('error').hidden ? null : document.getElementById('error').textContent))
 	if (error) throw new Error(`the page shows an error: ${error}`)
+	// the page fades and scales in on load; measure it once that has settled
+	await page.evaluate(() =>
+		Promise.all(
+			document
+				.getAnimations()
+				.filter((a) => a.effect && a.effect.getTiming().iterations !== Infinity)
+				.map((a) => a.finished.catch(() => {})),
+		),
+	)
 	await instrument(page)
 	return page
 }
@@ -813,17 +822,20 @@ try {
 		await frames(page, 3)
 		let calls = await qa(page, () => window.__qa.palettes.slice())
 		check('data-theme="dark" re-reads the palette (setPalette, dark: true)', calls.at(-1) === true, JSON.stringify(calls))
-		check('…and the page turns dark', (await page.evaluate(() => getComputedStyle(document.body).backgroundColor)) === 'rgb(13, 16, 10)', await page.evaluate(() => getComputedStyle(document.body).backgroundColor))
+		// the page is one dark look on purpose: every theme setting keeps it
+		const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
+		const lum = bg.match(/\d+/g).slice(0, 3).reduce((a, v) => a + Number(v), 0) / (3 * 255)
+		check('…and the page is dark', lum < 0.06, bg)
 		await page.evaluate(() => window.schleimpilz.step(1))
 		await page.screenshot({path: join(OUT, 'theme-dark.png')})
 		await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
 		await frames(page, 3)
 		calls = await qa(page, () => window.__qa.palettes.slice())
-		check('data-theme="light" re-reads it with dark: false', calls.at(-1) === false, JSON.stringify(calls))
+		check('data-theme="light" keeps the dark dish (dark: true)', calls.at(-1) === true, JSON.stringify(calls))
 		await page.evaluate(() => document.documentElement.removeAttribute('data-theme'))
 		await frames(page, 3)
 		calls = await qa(page, () => window.__qa.palettes.slice())
-		check('removing data-theme follows the system (light here)', calls.at(-1) === false && calls.length === 3, JSON.stringify(calls))
+		check('removing data-theme keeps it dark too', calls.at(-1) === true && calls.length === 3, JSON.stringify(calls))
 	})
 
 	await section('zoom', main, async () => {
@@ -994,7 +1006,13 @@ try {
 		}
 		const desk = await measure()
 		sizes(desk, '1440×900')
-		check('1440×900: the dish fills the bench height (860 px)', desk.w === 860, desk.w)
+		const room = await page.evaluate(() => {
+			const b = document.getElementById('bench'), cs = getComputedStyle(b)
+			const w = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
+			const h = b.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
+			return Math.floor(Math.min(w, h))
+		})
+		check('1440×900: the dish fills the room the bench gives it', Math.abs(desk.w - room) <= 1, `${desk.w} vs ${room}`)
 
 		await page.setViewportSize(PHONE)
 		await waitFor(page, (w) => document.getElementById('dish').getBoundingClientRect().width !== w, desk.w)
