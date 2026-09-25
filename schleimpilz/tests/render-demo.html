@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schleimpilz render demo</title>
+<link rel="stylesheet" href="../style.css">
+<style>
+	html, body {
+		margin: 0;
+		height: 100%;
+		overflow: hidden;
+		background: #050606;
+	}
+	/* the page behind the dish: black with an ambient amber glow, which the
+	   transparent canvas lets through */
+	#stage {
+		position: relative;
+		width: var(--size, min(100vw, 100vh));
+		height: var(--size, min(100vw, 100vh));
+		touch-action: none;
+		background: radial-gradient(circle, rgba(255, 176, 60, 0.12), rgba(255, 176, 60, 0.05) 50%, transparent 72%);
+	}
+	#stage canvas {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+	#info {
+		position: fixed;
+		right: 8px;
+		bottom: 8px;
+		margin: 0;
+		font: 12px/1.4 ui-monospace, Menlo, monospace;
+		color: var(--muted);
+		pointer-events: none;
+	}
+</style>
+</head>
+<body>
+<!--
+	Render demo for DishRenderer, without the rest of the page.
+	  ?light       the page's light tokens instead of the dark glass palette
+	  ?manual      don't run on its own (tests call window.demo)
+	  ?size=800    dish size in css px
+	  ?steps=600   run the model this far before the first frame
+	  ?lamp        shine a lamp on part of the dish
+	Wheel to zoom, drag to pan. Keys: space pause, d theme, 0 reset view.
+-->
+<div id="stage"><canvas id="gl"></canvas><canvas id="overlay"></canvas></div>
+<p id="info"></p>
+<script src="../data/berlin.js"></script>
+<script src="../network.js"></script>
+<script src="../render.js"></script>
+<script>
+'use strict'
+;(() => {
+	const query = new URLSearchParams(location.search)
+	const TAU = Math.PI * 2
+	const SIM = 1024
+	const PX_PER_KM = SIM / BERLIN.km[0]
+	const CITY_KM = 0.5
+	const EXTENT_KM = 1.6
+	const MESH_KM = SlimeNetwork.SPACING_KM || 0.4
+	const stage = document.getElementById('stage')
+	const glCanvas = document.getElementById('gl')
+	const overlay = document.getElementById('overlay')
+	const octx = overlay.getContext('2d')
+	const info = document.getElementById('info')
+	if (query.get('size')) stage.style.setProperty('--size', query.get('size') + 'px')
+
+	// --- the ground, stamped from every stop as app.js does it ---------------
+
+	function blur(src, r) {
+		const w = SIM, h = SIM, n = 2 * r + 1
+		const tmp = new Float32Array(w * h), out = new Uint8Array(w * h)
+		for (let y = 0; y < h; y++) {
+			let acc = 0
+			for (let x = -r; x <= r; x++) acc += src[y * w + Math.min(w - 1, Math.max(0, x))]
+			for (let x = 0; x < w; x++) {
+				tmp[y * w + x] = acc / n
+				acc += src[y * w + Math.min(w - 1, x + r + 1)] - src[y * w + Math.max(0, x - r)]
+			}
+		}
+		for (let x = 0; x < w; x++) {
+			let acc = 0
+			for (let y = -r; y <= r; y++) acc += tmp[Math.min(h - 1, Math.max(0, y)) * w + x]
+			for (let y = 0; y < h; y++) {
+				out[y * w + x] = Math.round(acc / n)
+				acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x]
+			}
+		}
+		return out
+	}
+
+	const ground = (() => {
+		const bin = atob(BERLIN.city)
+		const bytes = new Uint8Array(bin.length)
+		for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+		const pts = new Uint16Array(bytes.buffer)
+		const c = document.createElement('canvas')
+		c.width = SIM
+		c.height = SIM
+		const ctx = c.getContext('2d', {willReadFrequently: true})
+		const stamp = (km) => {
+			const r = km * PX_PER_KM
+			ctx.clearRect(0, 0, SIM, SIM)
+			ctx.fillStyle = '#fff'
+			ctx.beginPath()
+			for (let i = 0; i < pts.length; i += 2) {
+				const x = (pts[i] / 65535) * SIM
+				const y = (pts[i + 1] / 65535) * SIM
+				ctx.moveTo(x + r, y)
+				ctx.arc(x, y, r, 0, TAU)
+			}
+			ctx.fill()
+			const img = ctx.getImageData(0, 0, SIM, SIM).data
+			const out = new Uint8Array(SIM * SIM)
+			for (let i = 0; i < out.length; i++) out[i] = img[i * 4 + 3]
+			return blur(blur(out, 4), 4)
+		}
+		return {city: stamp(CITY_KM), extent: stamp(EXTENT_KM)}
+	})()
+	const maskAt = (mask, x, y) =>
+		mask[Math.min(SIM - 1, Math.max(0, Math.floor(y))) * SIM + Math.min(SIM - 1, Math.max(0, Math.floor(x)))] / 255
+	const inside = (x, y) => maskAt(ground.extent, x, y) > 0.5
+	const parkland = (x, y) => maskAt(ground.extent, x, y) * (1 - maskAt(ground.city, x, y))
+
+	// --- the model: CODE and the busiest stations -----------------------------
+
+	const net = new SlimeNetwork({width: SIM, height: SIM, spacing: MESH_KM * PX_PER_KM, inside, park: parkland})
+	const station = (i) => ({name: BERLIN.stations[i][0], x: BERLIN.stations[i][1] * SIM, y: BERLIN.stations[i][2] * SIM, kind: 'station', alive: true})
+	const flakes = [{name: 'CODE', x: BERLIN.code[1] * SIM, y: BERLIN.code[2] * SIM, kind: 'code', alive: true}, ...BERLIN.hubs.map(station)]
+	net.setFlakes(flakes)
+	net.inoculate(0)
+	let steps = 0
+
+	const renderer = new DishRenderer(glCanvas, {width: SIM, height: SIM})
+	renderer.setGround(ground.city, ground.extent)
+	renderer.setMesh(net)
+	if (renderer.setFlakes) renderer.setFlakes(flakes)
+
+	// --- colours, from the page's own tokens -----------------------------------
+
+	let dark = !query.has('light')
+	// the dark glass palette the page hands over
+	let override = {
+		dark: {
+			bench: '#050606', rim: '#6f7479', dish: '#0a0c0b', park: '#121614', outside: '#1b2127',
+			light: '#3a4658', trace: '#17130a', slime: '#ffc53d', core: '#ffebb0',
+		},
+	}
+	let colors = {}
+	function readPalette() {
+		document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+		const cs = getComputedStyle(document.documentElement)
+		const css = (name) => cs.getPropertyValue(name).trim()
+		const rgb = (name) => {
+			let h = css(name).replace('#', '')
+			if (h.length === 3) h = [...h].map((c) => c + c).join('')
+			const n = parseInt(h, 16)
+			return [(n >> 16) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
+		}
+		const p = {dark}
+		for (const key of ['bench', 'rim', 'dish', 'park', 'outside', 'light', 'trace', 'slime', 'core']) p[key] = rgb('--' + key)
+		const extra = override[dark ? 'dark' : 'light'] || {}
+		for (const key of Object.keys(extra)) {
+			const h = extra[key].replace('#', '')
+			const n = parseInt(h, 16)
+			p[key] = [(n >> 16) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
+		}
+		renderer.setPalette(p)
+		colors = {ink: css('--ink'), oat: css('--oat'), oatEdge: css('--oat-edge'), oatFed: css('--oat-fed')}
+	}
+	readPalette()
+
+	// --- size and view -----------------------------------------------------------
+
+	let dpr = Number(query.get('dpr')) || Math.min(window.devicePixelRatio || 1, 2)
+	let view = {x: SIM / 2, y: SIM / 2, zoom: 1}
+	function layout() {
+		const size = stage.clientWidth
+		glCanvas.width = overlay.width = Math.round(size * dpr)
+		glCanvas.height = overlay.height = Math.round(size * dpr)
+	}
+	layout()
+
+	// --- the overlay: oat flakes, as the page draws them -------------------------
+
+	function oatFlake(x, y, r, seed, fed) {
+		let s = (seed * 7919) % 233280
+		const rnd = () => (s = (s * 9301 + 49297) % 233280) / 233280
+		octx.save()
+		octx.translate(x, y)
+		octx.rotate(rnd() * Math.PI)
+		octx.beginPath()
+		const n = 11
+		for (let i = 0; i <= n; i++) {
+			const a = (i / n) * TAU
+			const k = 1 + (rnd() - 0.5) * 0.18
+			const px = Math.cos(a) * r * 1.25 * k, py = Math.sin(a) * r * 0.85 * k
+			i === 0 ? octx.moveTo(px, py) : octx.lineTo(px, py)
+		}
+		octx.closePath()
+		const g = octx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r * 1.3)
+		g.addColorStop(0, fed ? colors.oatFed : colors.oat)
+		g.addColorStop(1, colors.oatEdge)
+		octx.fillStyle = g
+		octx.fill()
+		octx.lineWidth = r * 0.15
+		octx.strokeStyle = colors.oatEdge
+		octx.stroke()
+		octx.restore()
+	}
+
+	let showFlakes = !query.has('noflakes')
+	function drawOverlay() {
+		octx.setTransform(1, 0, 0, 1, 0, 0)
+		octx.clearRect(0, 0, overlay.width, overlay.height)
+		if (!showFlakes) return
+		octx.setTransform(...DishRenderer.viewMatrix(view, overlay.width, overlay.height, SIM, SIM))
+		const reached = new Set(net.reachedFlakes())
+		flakes.forEach((f, i) => {
+			if (!f.alive) return
+			const big = f.kind === 'code' ? 1.3 : 1
+			oatFlake(f.x, f.y, 5.4 * big, i + 1, reached.has(i) && f.kind !== 'code')
+			if (f.kind === 'code') {
+				octx.beginPath()
+				octx.arc(f.x, f.y, 12.5, 0, TAU)
+				octx.strokeStyle = colors.ink
+				octx.lineWidth = 1.6
+				octx.stroke()
+			}
+		})
+	}
+
+	// --- running -----------------------------------------------------------------
+
+	function step(n) {
+		for (let i = 0; i < n; i++) net.step()
+		steps += n
+		return steps
+	}
+
+	function render(t = performance.now() / 1000, opts = {}) {
+		renderer.update(net)
+		renderer.render(t, {still: !!opts.still, view})
+		drawOverlay()
+	}
+
+	// Renders once and returns the dish (gl + overlay) as a PNG data URL.
+	// opts: {dpr, dark, view, crop: [x, y, w, h] in device px, scale, t, still}
+	function capture(opts = {}) {
+		if (opts.dark !== undefined && opts.dark !== dark) {
+			dark = opts.dark
+			readPalette()
+		}
+		if (opts.dpr && opts.dpr !== dpr) {
+			dpr = opts.dpr
+			layout()
+		}
+		view = opts.view || {x: SIM / 2, y: SIM / 2, zoom: 1}
+		const t0 = performance.now()
+		render(opts.t === undefined ? 10 : opts.t, {still: opts.still !== false})
+		const ms = performance.now() - t0
+		const [cx, cy, cw, ch] = opts.crop || [0, 0, glCanvas.width, glCanvas.height]
+		const k = opts.scale || 1
+		const out = document.createElement('canvas')
+		out.width = Math.round(cw * k)
+		out.height = Math.round(ch * k)
+		const ctx = out.getContext('2d')
+		ctx.imageSmoothingEnabled = k < 1
+		// the page behind: black, and the amber glow around the dish
+		ctx.fillStyle = '#050606'
+		ctx.fillRect(0, 0, out.width, out.height)
+		const m = DishRenderer.viewMatrix(view, glCanvas.width, glCanvas.height, SIM, SIM)
+		const sx = out.width / cw
+		const gx = (m[4] + (SIM / 2) * m[0] - cx) * sx, gy = (m[5] + (SIM / 2) * m[3] - cy) * sx
+		const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, SIM * 0.72 * m[0] * sx)
+		glow.addColorStop(0, 'rgba(255, 176, 60, 0.12)')
+		glow.addColorStop(0.5 / 0.72, 'rgba(255, 176, 60, 0.05)')
+		glow.addColorStop(1, 'rgba(255, 176, 60, 0)')
+		ctx.fillStyle = glow
+		ctx.fillRect(0, 0, out.width, out.height)
+		ctx.drawImage(glCanvas, cx, cy, cw, ch, 0, 0, out.width, out.height)
+		ctx.drawImage(overlay, cx, cy, cw, ch, 0, 0, out.width, out.height)
+		return {png: out.toDataURL('image/png'), ms, stats: renderer.stats()}
+	}
+
+	const initial = Number(query.get('steps')) || 0
+	if (initial) step(initial)
+	if (query.has('lamp')) {
+		// a lamp over Tempelhofer Feld and a stroke of light towards the east
+		for (let i = 0; i <= 12; i++) renderer.paintLight(560 + i * 9, 600 - i * 4, 1 * PX_PER_KM, 0.35)
+	}
+
+	window.demo = {
+		net,
+		renderer,
+		flakes,
+		get steps() {
+			return steps
+		},
+		step,
+		render,
+		capture,
+		paintLight: (x, y, r, a) => renderer.paintLight(x, y, r, a),
+		setTheme(d) {
+			dark = !!d
+			readPalette()
+		},
+		setPalette(p) {
+			if (p) override = p
+			readPalette()
+		},
+		setView(v) {
+			view = v
+		},
+		showFlakes(on) {
+			showFlakes = on
+		},
+	}
+
+	if (query.has('manual')) {
+		render(0, {still: true})
+		return
+	}
+
+	// --- on its own: grow, and let the hand lens wander --------------------------
+
+	let running = true
+	let last = performance.now()
+	function frame(now) {
+		if (running) {
+			const t0 = performance.now()
+			while (performance.now() - t0 < 8) step(1)
+		}
+		render(now / 1000)
+		if (Math.floor(now / 500) !== Math.floor(last / 500)) {
+			const s = renderer.stats()
+			info.textContent = `step ${steps} · tubes ${s.tubes} · veins ${s.veins} · cpu ${renderer.cpuMs.toFixed(2)} ms · zoom ${view.zoom.toFixed(2)}`
+		}
+		last = now
+		requestAnimationFrame(frame)
+	}
+	requestAnimationFrame(frame)
+
+	const toMap = (e) => {
+		const r = glCanvas.getBoundingClientRect()
+		const m = DishRenderer.viewMatrix(view, glCanvas.width, glCanvas.height, SIM, SIM)
+		const px = ((e.clientX - r.left) / r.width) * glCanvas.width
+		const py = ((e.clientY - r.top) / r.height) * glCanvas.height
+		return {x: (px - m[4]) / m[0], y: (py - m[5]) / m[3], px, py}
+	}
+	const clampView = () => {
+		view.zoom = Math.min(4, Math.max(1, view.zoom))
+		const half = SIM / 2 / view.zoom
+		view.x = Math.min(SIM - half, Math.max(half, view.x))
+		view.y = Math.min(SIM - half, Math.max(half, view.y))
+	}
+	stage.addEventListener('wheel', (e) => {
+		e.preventDefault()
+		const p = toMap(e)
+		const zoom = Math.min(4, Math.max(1, view.zoom * Math.exp(-e.deltaY * 0.002)))
+		// keep the point under the pointer where it is
+		const s = Math.min(glCanvas.width, glCanvas.height) / SIM
+		view = {x: p.x - (p.px - glCanvas.width / 2) / (s * zoom), y: p.y - (p.py - glCanvas.height / 2) / (s * zoom), zoom}
+		clampView()
+	}, {passive: false})
+	let drag = null
+	stage.addEventListener('pointerdown', (e) => {
+		drag = {x: e.clientX, y: e.clientY, view: {...view}}
+		stage.setPointerCapture(e.pointerId)
+	})
+	stage.addEventListener('pointermove', (e) => {
+		if (!drag) return
+		const r = glCanvas.getBoundingClientRect()
+		const k = SIM / r.width / view.zoom
+		view = {...drag.view, x: drag.view.x - (e.clientX - drag.x) * k, y: drag.view.y - (e.clientY - drag.y) * k}
+		clampView()
+	})
+	stage.addEventListener('pointerup', () => (drag = null))
+	document.addEventListener('keydown', (e) => {
+		if (e.key === ' ') running = !running
+		if (e.key === 'd') window.demo.setTheme(!dark)
+		if (e.key === '0') view = {x: SIM / 2, y: SIM / 2, zoom: 1}
+	})
+	new ResizeObserver(layout).observe(stage)
+})()
+</script>
+</body>
+</html>
