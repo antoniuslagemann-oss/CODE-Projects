@@ -1,0 +1,20 @@
+{
+  "name": "schleimpilz",
+  "private": true,
+  "version": "1.0.0",
+  "description": "A slime mold grows a transit network across Berlin, in the browser.",
+  "scripts": {
+    "build:data": "node tools/build-data.mjs",
+    "build:single": "node tools/build-single.mjs",
+    "check:single": "node tools/check-single.mjs",
+    "test": "node tests/smoke.mjs",
+    "test:interaction": "node tests/interaction.mjs",
+    "compare": "node tools/compare.mjs",
+    "preview": "node tools/preview.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1",
+    "vbb-lines": "5.28.0",
+    "vbb-stations": "9.4.0"
+  }
+}
