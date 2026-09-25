@@ -2,6 +2,8 @@
 
 A slime mold grows a transit network across Berlin, in your browser.
 
+![The dish once the slime has linked the oat flakes, with the slime-against-rail panel and the lab log beside it](docs/schleimpilz.jpg)
+
 In 2010, Atsushi Tero, Toshiyuki Nakagaki and their colleagues put oat flakes on a map of the Tokyo area, one for each big city, and let a slime mold called *Physarum polycephalum* loose on it. They lit the sea and the mountains, because the slime keeps away from light. After a day it had grown a network of tubes between the flakes that looked a lot like the region's railways, and it did about as well on cost, speed and resilience. The paper won them an Ig Nobel Prize.
 
 This is the same experiment for Berlin. The slime starts at CODE University in Neukölln. There's an oat flake on 37 of the city's busiest stations. Outside the city the dish is lit, so the slime stays in Berlin. Once it has found its way around, you can switch on the real S-Bahn and U-Bahn and see how close it got.
@@ -76,4 +78,4 @@ npm run check:single      # test that file the way the Artifact host serves it
 - A. Tero, S. Takagi, T. Saigusa, K. Ito, D. P. Bebber, M. D. Fricker, K. Yumiki, R. Kobayashi, T. Nakagaki: Rules for Biologically Inspired Adaptive Network Design. *Science* 327 (5964), 439–442 (2010). [doi:10.1126/science.1177894](https://doi.org/10.1126/science.1177894)
 - Stops, stations and lines: VBB Verkehrsverbund Berlin-Brandenburg GmbH, [GTFS timetable data](https://unternehmen.vbb.de/digitale-services/datensaetze/), CC BY 4.0, modified. Packaged as [vbb-stations](https://github.com/derhuerst/vbb-stations) and [vbb-lines](https://github.com/derhuerst/vbb-lines) by Jannis R.
 - CODE University of Applied Sciences, Donaustraße 44, 12043 Berlin. Its spot on the map is placed by hand and good to about 150 m.
-- Fonts: Fraunces, Atkinson Hyperlegible Next and Mono, and Caveat, all from Google Fonts under the SIL Open Font License.
+- Fonts: Unbounded, Geist and Geist Mono, from Google Fonts under the SIL Open Font License.

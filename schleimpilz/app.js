@@ -509,10 +509,12 @@
 		if (pointers.has(e.pointerId)) pointers.set(e.pointerId, {cx: p.cx, cy: p.cy})
 		state.pointer = {x: p.cx, y: p.cy}
 		if (pinch && pointers.size >= 2) {
+			// the map point that was between the fingers stays between them
 			const now = pinchNow()
-			zoomAt(now.cx, now.cy, now.dist / Math.max(1, pinch.dist))
-			view.x -= (now.cx - pinch.cx) / scale()
-			view.y -= (now.cy - pinch.cy) / scale()
+			const [px, py] = fromCss(pinch.cx, pinch.cy)
+			view.zoom = Math.min(MAX_ZOOM, Math.max(1, (view.zoom * now.dist) / Math.max(1, pinch.dist)))
+			view.x = px - (now.cx - cssSize / 2) / scale()
+			view.y = py - (now.cy - cssSize / 2) / scale()
 			clampView()
 			pinch = now
 			return
